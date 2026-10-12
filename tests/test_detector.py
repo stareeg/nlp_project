@@ -61,6 +61,7 @@ class DetectorTest(unittest.TestCase):
     def test_forward_order(self):
         actual = tuples(self.detector, "НК РФ, статья 374, пункт 2, подпункт 1.")
         self.assertEqual(actual, [(15, "374", "2", "1")])
+        self.assertEqual(tuples(self.detector, "ГК РФ (ст. 10)"), [(5, "10", None, None)])
 
     def test_part_maps_to_point(self):
         actual = tuples(self.detector, "часть 3, ст. 30.1 КоАП РФ")
@@ -115,6 +116,37 @@ class DetectorTest(unittest.TestCase):
     def test_conjunction_a_is_not_a_value(self):
         actual = tuples(self.detector, "ст. 143 и 332, а также ст. 227 НК РФ")
         self.assertEqual(actual, [(15, "143", None, None), (15, "332", None, None), (15, "227", None, None)])
+
+    def test_quoted_subpoints_and_podp_marker(self):
+        self.assertEqual(tuples(self.detector, "пп. «а» и «е» п. 1 ст. 10 НК РФ"),
+                         [(15, "10", "1", "а"), (15, "10", "1", "е")])
+        self.assertEqual(tuples(self.detector, "подп. 13 ч. 9 ст. 310 УК РФ"), [(13, "310", "9", "13")])
+        self.assertEqual(tuples(self.detector, "пп.л п. 2 ст. 252 ЖК РФ"), [(7, "252", "2", "л")])
+
+    def test_latin_homoglyph_in_dictionary(self):
+        self.assertEqual(tuples(self.detector, "ст. 90 СК РФ"), [(8, "90", None, None)])
+
+    def test_extra_abbreviations(self):
+        self.assertEqual(tuples(self.detector, "ч. 3 ст. 30.1 КоАП"), [(17, "30.1", "3", None)])
+        self.assertEqual(tuples(self.detector, "ст. 10 УКРФ"), [(13, "10", None, None)])
+
+    def test_law_by_number_in_any_order(self):
+        for text in (
+            "ст. 6 Федерального закона от 27.07.2006 N 152-ФЗ",
+            "ст. 6 закона № 152-ФЗ",
+            "ст. 6 ФЗ-152",
+        ):
+            self.assertEqual(tuples(self.detector, text), [(330, "6", None, None)], text)
+
+    def test_typo_in_marker_word(self):
+        self.assertEqual(tuples(self.detector, "в пукнте 2 стаьи 5 УК РФ"), [(13, "5", "2", None)])
+
+    def test_typo_law_between_exact_laws(self):
+        actual = tuples(self.detector, "ст. 431 Налогвого кодекса РФ, ст. 170 УПК РФ")
+        self.assertEqual(actual, [(15, "431", None, None), (12, "170", None, None)])
+
+    def test_plain_words_close_to_markers_are_ignored(self):
+        self.assertEqual(tuples(self.detector, "Статус 5 присвоен, честь 3 раз, в зале № 4."), [])
 
     def test_empty_text(self):
         self.assertEqual(tuples(self.detector, ""), [])

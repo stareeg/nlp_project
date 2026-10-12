@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import re
 
+from .aliases import expand_aliases
 from .models import LawMention, Token
 from .normalizer import alias_tokens, normalize_text, tokenize
 
@@ -14,6 +15,7 @@ from .normalizer import alias_tokens, normalize_text, tokenize
 _FUZZY_THRESHOLD = 0.89
 _FUZZY_MARGIN = 0.015
 _FUZZY_FLOOR = _FUZZY_THRESHOLD - _FUZZY_MARGIN
+_REQUISITE_TOKENS = {"ст", "п", "пп", "подп", "ч", "абз", "пункт", "стат", "част", "подпункт"}
 
 @dataclass
 class _Node:
@@ -32,7 +34,7 @@ class LawAliasIndex:
     """Token-level Aho-Corasick index for all supplied law aliases."""
 
     def __init__(self, aliases: dict[str, list[str]]) -> None:
-        self.aliases = {int(key): values for key, values in aliases.items()}
+        self.aliases = expand_aliases({int(key): values for key, values in aliases.items()})
         self.nodes: list[_Node] = [_Node()]
         self.metadata: dict[int, LawMetadata] = {}
         grouped: dict[tuple[str, ...], set[int]] = {}
@@ -60,6 +62,7 @@ class LawAliasIndex:
         self._build_failures()
         self._fuzzy_entries: list[tuple[tuple[str, ...], tuple[int, ...], str]] = []
         self._fuzzy_postings: dict[str, list[int]] = {}
+        self._fuzzy_by_initial: dict[str, set[int]] = {}
         for key, law_ids in grouped.items():
             if not 2 <= len(key) <= 24:
                 continue
@@ -67,6 +70,7 @@ class LawAliasIndex:
             self._fuzzy_entries.append((key, tuple(sorted(law_ids)), display[key]))
             for token in set(key):
                 self._fuzzy_postings.setdefault(token, []).append(entry_index)
+            self._fuzzy_by_initial.setdefault(key[0][0], set()).add(entry_index)
 
     @classmethod
     def from_json(cls, path: str | Path) -> "LawAliasIndex":
@@ -113,12 +117,18 @@ class LawAliasIndex:
         query = tokenize(fragment)
         if len(query) < 2:
             return None
+        first = query[0].value
+        if not first[0].isalpha() or first in _REQUISITE_TOKENS:
+            return None
         query = query[:24]
         candidate_indexes: set[int] = set()
         for token in query:
             postings = self._fuzzy_postings.get(token.value, ())
             if len(postings) <= 2500:
                 candidate_indexes.update(postings)
+        # The alias is compared with the beginning of the fragment, and typos
+        # in the very first letter are rare.
+        candidate_indexes.intersection_update(self._fuzzy_by_initial.get(first[0], ()))
         if not candidate_indexes:
             return None
 

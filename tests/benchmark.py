@@ -58,11 +58,13 @@ LAWS_FULL = {
 }
 # Formats from real legal texts that are not covered by the dictionary verbatim.
 LAWS_HARD = {
-    8: ["СК РФ"],
-    17: ["КоАП"],
-    330: ["Федерального закона от 27.07.2006 N 152-ФЗ", "Федерального закона от 27.07.2006 № 152-ФЗ «О персональных данных»"],
-    13: ["УК РФ"],
-    15: ["НК РФ"],
+    8: ["СК РФ", "Семейного кодекса РФ"],
+    17: ["КоАП", "КоАП РФ"],
+    330: ["Федерального закона от 27.07.2006 N 152-ФЗ", "Федерального закона от 27.07.2006 № 152-ФЗ «О персональных данных»",
+          "Закона № 152-ФЗ", "ФЗ-152", "закона N 152-ФЗ"],
+    13: ["УК РФ", "УКРФ", "Уголовного кодекса"],
+    15: ["НК РФ", "Налогвого кодекса РФ", "Налогового кодекса"],
+    5: ["ГК РФ", "Гражданского кодекса Росийской Федерации"],
 }
 
 # Case of the head word of a reference depends on the preceding preposition.
@@ -131,6 +133,17 @@ class Builder:
             return self.r.choice(LETTERS)
         return str(self.r.randint(1, 15))
 
+    def typo(self, word: str) -> str:
+        """One adjacent swap or deletion inside the word."""
+        while True:
+            position = self.r.randint(1, len(word) - 3)
+            if self.r.random() < 0.5:
+                result = word[:position] + word[position + 1] + word[position] + word[position + 2 :]
+            else:
+                result = word[:position] + word[position + 1 :]
+            if result != word:
+                return result
+
     def values(self, make, count: int) -> list[str]:
         result: list[str] = []
         while len(result) < count:
@@ -165,6 +178,8 @@ class Builder:
                 marker = HEADS[level][number][case] if position == 0 else GENITIVE[level]
                 if count > 1 and position > 0:
                     marker = HEADS[level]["pl"]["gen"]
+                if hard and len(marker) >= 6 and self.r.random() < 0.35:
+                    marker = self.typo(marker)
             separator = "" if hard and case is None and self.r.random() < 0.3 else " "
             parts.append(f"{marker}{separator}{_join(rendered_values)}")
         links = []
@@ -241,7 +256,7 @@ def build_levels(seed: int = 2025) -> dict[str, list[tuple[str, set[Link]]]]:
     levels["2_full_forms"] = [b.text(b.r.randint(1, 2), (1, 1), full_pool, "mixed", 3, 0.2) for _ in range(CASES_PER_LEVEL)]
     levels["3_chains"] = [b.text(b.r.randint(2, 6), (1, 3), full_pool, "mixed", 3, 0.4) for _ in range(CASES_PER_LEVEL - 1)]
     levels["3_chains"].append(_readme_case())
-    levels["4_hard"] = [b.text(b.r.randint(1, 4), (1, 3), {**LAWS_HARD, **LAWS_SHORT}, "abbr", 3, 0.3, hard=True)
+    levels["4_hard"] = [b.text(b.r.randint(1, 4), (1, 3), {**LAWS_SHORT, **LAWS_HARD}, "mixed", 3, 0.3, hard=True)
                         for _ in range(CASES_PER_LEVEL)]
     return levels
 

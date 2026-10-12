@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import lru_cache
 import re
 import unicodedata
 
@@ -25,6 +26,8 @@ _QUOTES = str.maketrans({
     "‘": "'",
     "’": "'",
 })
+_HOMOGLYPHS = str.maketrans("aceopxykmtbh", "асеорхукмтвн")
+_MIXED_WORD_RE = re.compile(r"[a-zа-я]*(?:[a-z][а-я]|[а-я][a-z])[a-zа-я]*")
 _SPACE_RE = re.compile(r"[\s\u00a0\u2007\u202f]+")
 _NUMBER_SIGN_RE = re.compile(r"(?i)(?<![\wа-яё])(?:no|n)\.?\s*(?=\d)")
 _NUMBER_SPACE_RE = re.compile(r"№\s+(?=\d)")
@@ -117,6 +120,7 @@ def _russian_stem(word: str) -> str:
     return stemmed or word
 
 
+@lru_cache(maxsize=None)
 def _canonical_token(value: str) -> str:
     if "-" in value and not value[0].isdigit():
         return "-".join(_russian_stem(part) for part in value.split("-"))
@@ -128,6 +132,8 @@ def normalize_text(text: str) -> str:
     value = unicodedata.normalize("NFKC", text)
     value = value.translate(_DASHES).translate(_QUOTES)
     value = value.casefold().replace("ё", "е")
+    # Latin look-alikes inside Cyrillic words, e.g. "CК РФ" typed with Latin C.
+    value = _MIXED_WORD_RE.sub(lambda match: match.group(0).translate(_HOMOGLYPHS), value)
     value = _NUMBER_SIGN_RE.sub("№", value)
     value = _NUMBER_SPACE_RE.sub("№", value)
     return _SPACE_RE.sub(" ", value).strip()

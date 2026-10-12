@@ -15,11 +15,26 @@ _ABBREVIATIONS = {
     "ст",
     "п",
     "пп",
+    "подп",
     "ч",
+    "абз",
+    "гл",
+    "разд",
+    "прил",
+    "см",
+    "утв",
+    "им",
+    "т",
+    "д",
+    "др",
     "рф",
     "фз",
     "ред",
     "г",
+    "гг",
+    "руб",
+    "тыс",
+    "млн",
 }
 _RIGHT_PREFIX_RE = re.compile(
     r"^[\s,:()\-]*(?:(?:в|по|из|согласно|включая)\s+)?$",
@@ -27,6 +42,7 @@ _RIGHT_PREFIX_RE = re.compile(
 )
 # Requisites this close to the next law name are its left-hand context.
 _LEFT_CONTEXT_GAP = 55
+_SEPARATORS_RE = re.compile(r"[\s,;:()\-]*(?:(?:и|или|а также|также)[\s,;:()\-]*)*")
 
 
 class _Sentences:
@@ -77,7 +93,7 @@ class LawReferenceDetector:
         links: list[ParsedLawLink] = []
         for mention_index, mention in enumerate(mentions):
             previous_end = mentions[mention_index - 1].end if mention_index else 0
-            next_start = mentions[mention_index + 1].start if mention_index + 1 < len(mentions) else len(normalized)
+            next_start = mentions[mention_index + 1].start if mention_index + 1 < len(mentions) else None
             links.extend(self._parse_mention(normalized, mention, previous_end, next_start, sentences))
         return self._deduplicate(links)
 
@@ -88,14 +104,17 @@ class LawReferenceDetector:
         sentences: _Sentences,
     ) -> list[LawMention]:
         requisites = extract_requisites(text)
+        mention_starts = [mention.start for mention in exact_mentions]
         fuzzy: list[LawMention] = []
-        for requisite in requisites:
+        for number, requisite in enumerate(requisites):
             sentence_end = sentences.end(requisite.end)
-            if any(
-                requisite.end <= mention.start <= requisite.end + 450 and mention.start < sentence_end
-                for mention in exact_mentions
-            ):
-                continue
+            next_index = bisect_left(mention_starts, requisite.end)
+            if next_index < len(exact_mentions):
+                next_start = mention_starts[next_index]
+                if next_start <= sentence_end and self._only_requisites_between(
+                    text, requisites[number + 1 :], requisite.end, next_start
+                ):
+                    continue
             fragment_end = min(sentence_end, requisite.end + 350)
             fragment = text[requisite.end:fragment_end]
             mention = self.index.find_fuzzy(fragment, requisite.end)
@@ -106,18 +125,30 @@ class LawReferenceDetector:
             fuzzy.append(mention)
         return sorted(exact_mentions + fuzzy, key=lambda item: item.start)
 
+    @staticmethod
+    def _only_requisites_between(text: str, requisites: list[Requisite], start: int, end: int) -> bool:
+        pieces: list[str] = []
+        position = start
+        for requisite in requisites:
+            if requisite.start >= end:
+                break
+            pieces.append(text[position : requisite.start])
+            position = max(position, requisite.end)
+        pieces.append(text[position:end])
+        return _SEPARATORS_RE.fullmatch(" ".join(pieces)) is not None
+
     def _parse_mention(
         self,
         text: str,
         mention: LawMention,
         previous_law_end: int,
-        next_law_start: int,
+        next_law_start: int | None,
         sentences: _Sentences,
     ) -> list[ParsedLawLink]:
         sentence_start = sentences.start(mention.start)
         sentence_end = sentences.end(mention.end)
         left_start = max(previous_law_end, sentence_start, mention.start - 450)
-        right_end = min(next_law_start, sentence_end, mention.end + 180)
+        right_end = min(len(text) if next_law_start is None else next_law_start, sentence_end, mention.end + 180)
 
         left_requisites = extract_requisites(text[left_start : mention.start], left_start)
         # A legal requisite must directly introduce the law name. This prevents
@@ -133,7 +164,7 @@ class LawReferenceDetector:
             prefix = text[mention.end : right_requisites[0].start]
             if right_requisites[0].start - mention.end > 45 or not _RIGHT_PREFIX_RE.fullmatch(prefix):
                 right_requisites = []
-        if right_requisites and right_end == next_law_start and next_law_start <= sentence_end:
+        if right_requisites and next_law_start is not None and right_end == next_law_start <= sentence_end:
             # "ст. 105 УК РФ, ч. 2 ст. 158 УК РФ": the trailing requisites
             # introduce the next law, as reverse order is the norm.
             if next_law_start - right_requisites[-1].end <= _LEFT_CONTEXT_GAP:
