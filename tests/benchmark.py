@@ -1,13 +1,7 @@
-"""Graded benchmark with gold labels.
-
-Four levels of 250 texts each, from single abbreviated references to long
-texts with chains of references, inflected names, lists and noisy formats.
-
-    python tests/benchmark.py                          # in-process detector
-    python tests/benchmark.py --url http://localhost:8978/detect
-    python tests/benchmark.py --errors 20              # print failed texts
-"""
-
+# Свой бенчмарк с разметкой: 4 уровня по 250 текстов, от простых ссылок к сложным.
+#   python tests/benchmark.py
+#   python tests/benchmark.py --url http://localhost:8978/detect   (проверить запущенный сервис)
+#   python tests/benchmark.py --errors 10                          (показать ошибки)
 from __future__ import annotations
 
 import argparse
@@ -21,10 +15,9 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-CASES_PER_LEVEL = 250
-Link = tuple  # (law_id, article, point_article, subpoint_article)
+TEXTS_PER_LEVEL = 250
 
-LAWS_SHORT = {
+CODES_SHORT = {
     15: ["НК РФ", "НК России"],
     13: ["УК РФ"],
     5: ["ГК РФ"],
@@ -56,7 +49,6 @@ LAWS_FULL = {
     224: ["Федерального закона «О бухгалтерском учете»"],
     984: ["Закона «О защите прав потребителей»"],
 }
-# Formats from real legal texts that are not covered by the dictionary verbatim.
 LAWS_HARD = {
     8: ["СК РФ", "Семейного кодекса РФ"],
     17: ["КоАП", "КоАП РФ"],
@@ -67,7 +59,7 @@ LAWS_HARD = {
     5: ["ГК РФ", "Гражданского кодекса Росийской Федерации"],
 }
 
-# Case of the head word of a reference depends on the preceding preposition.
+# падеж первого слова ссылки зависит от предлога
 INTROS = [
     ("Согласно", "dat"),
     ("В соответствии с", "ins"),
@@ -76,7 +68,7 @@ INTROS = [
     ("Как указано в", "pre"),
     ("Исходя из", "gen"),
 ]
-HEADS = {
+WORDS = {
     "article": {"sg": {"gen": "статьи", "dat": "статье", "ins": "статьей", "pre": "статье"},
                 "pl": {"gen": "статей", "dat": "статьям", "ins": "статьями", "pre": "статьях"}},
     "point": {"sg": {"gen": "пункта", "dat": "пункту", "ins": "пунктом", "pre": "пункте"},
@@ -86,10 +78,9 @@ HEADS = {
     "subpoint": {"sg": {"gen": "подпункта", "dat": "подпункту", "ins": "подпунктом", "pre": "подпункте"},
                  "pl": {"gen": "подпунктов", "dat": "подпунктам", "ins": "подпунктами", "pre": "подпунктах"}},
 }
-ABBR = {"article": "ст.", "point": "п.", "part": "ч.", "subpoint": "пп."}
-GENITIVE = {"article": "статьи", "point": "пункта", "part": "части", "subpoint": "подпункта"}
+SHORT = {"article": "ст.", "point": "п.", "part": "ч.", "subpoint": "пп."}
 LETTERS = "абвгдежзклмнопрт"
-FILLERS = [
+ENDINGS = [
     "налогоплательщик обязан представить декларацию",
     "установлена ответственность за нарушение срока",
     "суд вправе снизить размер неустойки",
@@ -108,20 +99,29 @@ NOISE = [
     "Пункт 7 повестки дня был перенесен.",
 ]
 
+# разметка примера из условия задания (tests/example_text.txt)
+EXAMPLE_GOLD = {
+    (15, "374", "1", "1"), (13, "105", None, None), (0, None, "10", None), (13, "105", "5", None),
+    (13, "158", "3", None), (5, "30", None, None), (13, "159", "4", "12"), (13, "228", "2", None),
+    (15, "275", None, None), (8, "90", None, None), (10, "70", None, None), (6, "213", "1", None),
+    (0, "20", "а", None), (984, "16", None, None), (330, "14", "2", None), (224, "19", None, None),
+    (412, "9", "р", None), (284, "16", "1", None), (362, "22", "б", "2"), (332, "12", None, None),
+    (249, "20", "3", None), (5, "34", "1", None), (17, "30.1", "3", None), (0, "211", None, None),
+    *((174, "14", "1", sub) for sub in ("4", "5", "6", "8")),
+    *((15, "66", point, sub) for point in ("3.345", "23") for sub in ("а", "б", "с")),
+}
 
-def _join(values: list[str]) -> str:
-    if len(values) == 1:
-        return values[0]
-    return ", ".join(values[:-1]) + " и " + values[-1]
+
+def join(values: list[str]) -> str:
+    return values[0] if len(values) == 1 else ", ".join(values[:-1]) + " и " + values[-1]
 
 
-class Builder:
+class Generator:
     def __init__(self, seed: int) -> None:
         self.r = random.Random(seed)
 
     def article(self) -> str:
-        roll = self.r.random()
-        if roll < 0.15:
+        if self.r.random() < 0.15:
             return f"{self.r.randint(1, 40)}.{self.r.randint(1, 9)}"
         return str(self.r.randint(1, 450))
 
@@ -129,197 +129,193 @@ class Builder:
         return str(self.r.randint(1, 12))
 
     def subpoint(self) -> str:
-        if self.r.random() < 0.5:
-            return self.r.choice(LETTERS)
-        return str(self.r.randint(1, 15))
+        return self.r.choice(LETTERS) if self.r.random() < 0.5 else str(self.r.randint(1, 15))
+
+    def distinct(self, make, count: int) -> list[str]:
+        values: list[str] = []
+        while len(values) < count:
+            value = make()
+            if value not in values:
+                values.append(value)
+        return values
 
     def typo(self, word: str) -> str:
-        """One adjacent swap or deletion inside the word."""
+        # перестановка соседних букв или пропуск буквы
         while True:
-            position = self.r.randint(1, len(word) - 3)
+            i = self.r.randint(1, len(word) - 3)
             if self.r.random() < 0.5:
-                result = word[:position] + word[position + 1] + word[position] + word[position + 2 :]
+                result = word[:i] + word[i + 1] + word[i] + word[i + 2 :]
             else:
-                result = word[:position] + word[position + 1 :]
+                result = word[:i] + word[i + 1 :]
             if result != word:
                 return result
-
-    def values(self, make, count: int) -> list[str]:
-        result: list[str] = []
-        while len(result) < count:
-            value = make()
-            if value not in result:
-                result.append(value)
-        return result
-
-    def reference(self, case: str | None, max_list: int = 1, part_word: bool | None = None, hard: bool = False):
-        """Return (text, [(article, point, subpoint)]) for one reverse-order reference."""
-        depth = self.r.choice([1, 1, 2, 2, 3])
-        point_kind = "part" if (part_word if part_word is not None else self.r.random() < 0.3) else "point"
-        list_level = self.r.randint(1, depth) if max_list > 1 and self.r.random() < 0.5 else 0
-        levels = ["article", point_kind, "subpoint"][:depth][::-1]
-        makers = {"article": self.article, point_kind: self.point, "subpoint": self.subpoint}
-        values: dict[str, list[str]] = {}
-        parts: list[str] = []
-        for position, level in enumerate(levels):
-            count = self.r.randint(2, max_list) if list_level and levels[position] == ["article", point_kind, "subpoint"][list_level - 1] else 1
-            values[level] = self.values(makers[level], count)
-            rendered_values = values[level]
-            if hard and level == "subpoint" and rendered_values[0].isalpha() and self.r.random() < 0.6:
-                rendered_values = [f"«{value}»" for value in rendered_values]
-            if case is None:
-                marker = ABBR[level]
-                if hard and level == "subpoint" and self.r.random() < 0.4:
-                    marker = "подп."
-                if count > 1 and level == "article" and self.r.random() < 0.3:
-                    marker = "ст.ст."
-            else:
-                number = "pl" if count > 1 else "sg"
-                marker = HEADS[level][number][case] if position == 0 else GENITIVE[level]
-                if count > 1 and position > 0:
-                    marker = HEADS[level]["pl"]["gen"]
-                if hard and len(marker) >= 6 and self.r.random() < 0.35:
-                    marker = self.typo(marker)
-            separator = "" if hard and case is None and self.r.random() < 0.3 else " "
-            parts.append(f"{marker}{separator}{_join(rendered_values)}")
-        links = []
-        for article in values.get("article", [None]):
-            for point in values.get(point_kind, [None]):
-                for subpoint in values.get("subpoint", [None]):
-                    links.append((article, point, subpoint))
-        return " ".join(parts), links
 
     def law(self, pool: dict[int, list[str]]) -> tuple[int, str]:
         law_id = self.r.choice(list(pool))
         return law_id, self.r.choice(pool[law_id])
 
-    def sentence(self, refs: int, pool, case_mode: str, max_list: int, hard: bool = False):
+    def reference(self, case: str | None, max_list: int, hard: bool):
+        # одна ссылка в обратном порядке: "пп. 1 п. 2 ст. 3", case=None значит сокращения
+        depth = self.r.choice([1, 1, 2, 2, 3])
+        middle = "part" if self.r.random() < 0.3 else "point"
+        levels = ["article", middle, "subpoint"][:depth]
+        listed = self.r.choice(levels) if max_list > 1 and self.r.random() < 0.5 else None
+        makers = {"article": self.article, middle: self.point, "subpoint": self.subpoint}
+        values = {level: self.distinct(makers[level], self.r.randint(2, max_list) if level == listed else 1)
+                  for level in levels}
+
+        parts = []
+        for n, level in enumerate(reversed(levels)):
+            shown = values[level]
+            if hard and level == "subpoint" and shown[0].isalpha() and self.r.random() < 0.6:
+                shown = [f"«{value}»" for value in shown]
+            plural = len(shown) > 1
+            if case is None:
+                marker = SHORT[level]
+                if hard and level == "subpoint" and self.r.random() < 0.4:
+                    marker = "подп."
+                if plural and level == "article" and self.r.random() < 0.3:
+                    marker = "ст.ст."
+            else:
+                marker = WORDS[level]["pl" if plural else "sg"][case if n == 0 else "gen"]
+                if hard and len(marker) >= 6 and self.r.random() < 0.35:
+                    marker = self.typo(marker)
+            space = "" if hard and case is None and self.r.random() < 0.3 else " "
+            parts.append(f"{marker}{space}{join(shown)}")
+
+        links = [
+            (article, point, sub)
+            for article in values["article"]
+            for point in values.get(middle, [None])
+            for sub in values.get("subpoint", [None])
+        ]
+        return " ".join(parts), links
+
+    def sentence(self, refs: int, pool, case_mode: str, max_list: int, hard: bool):
         intro, case = self.r.choice(INTROS)
-        if case_mode == "abbr":
+        if case_mode == "short" or (case_mode == "mixed" and self.r.random() < 0.5):
             case = None
-        elif case_mode == "mixed" and self.r.random() < 0.5:
-            case = None
-        gold: set[Link] = set()
-        chunks: list[str] = []
+        gold = set()
+        chunks = []
         shared_law = refs > 1 and self.r.random() < 0.3
         law_id, law_text = self.law(pool)
-        for index in range(refs):
-            text, links = self.reference(case, max_list, hard=hard)
+        for n in range(refs):
+            text, links = self.reference(case, max_list, hard)
             if not shared_law:
                 law_id, law_text = self.law(pool)
-            if not shared_law or index == refs - 1:
+            if not shared_law or n == refs - 1:
                 text = f"{text} {law_text}"
             chunks.append(text)
             gold.update((law_id, *link) for link in links)
-        connectors = [", ", ", а также ", " и "] + ([] if shared_law else ["; "])
-        connector = self.r.choice(connectors) if refs > 1 else ""
-        body = connector.join(chunks) if refs <= 2 else ", ".join(chunks[:-1]) + " и " + chunks[-1]
-        return f"{intro} {body} {self.r.choice(FILLERS)}.", gold
+        if refs <= 2:
+            body = self.r.choice([", ", ", а также ", " и "] + ([] if shared_law else ["; "])).join(chunks)
+        else:
+            body = ", ".join(chunks[:-1]) + " и " + chunks[-1]
+        return f"{intro} {body} {self.r.choice(ENDINGS)}.", gold
 
-    def text(self, sentences: int, refs_range, pool, case_mode, max_list, noise: float, hard: bool = False):
-        parts: list[str] = []
-        gold: set[Link] = set()
+    def back_reference(self):
+        # "п. 3 указанной статьи", "ст. 11 того же кодекса", "пункт 2 части 1 статьи 7"
+        law_id, law = self.law(CODES_SHORT)
+        article, other = self.distinct(self.article, 2)
+        point, part = self.point(), self.point()
+        ending = self.r.choice(ENDINGS)
+        kind = self.r.randint(0, 2)
+        if kind == 0:
+            return (f"Согласно ст. {article} {law}, при этом п. {point} указанной статьи {ending}.",
+                    {(law_id, article, None, None), (law_id, article, point, None)})
+        if kind == 1:
+            return (f"В ст. {article} {law} и ст. {other} того же кодекса {ending}.",
+                    {(law_id, article, None, None), (law_id, other, None, None)})
+        return f"Согласно пункту {point} части {part} статьи {article} {law} {ending}.", {(law_id, article, part, point)}
+
+    def text(self, sentences: int, refs, pool, case_mode, max_list, noise: float, hard: bool = False):
+        parts = []
+        gold = set()
         for _ in range(sentences):
             if self.r.random() < noise:
                 parts.append(self.r.choice(NOISE))
-            sentence, links = self.sentence(self.r.randint(*refs_range), pool, case_mode, max_list, hard)
+            if hard and self.r.random() < 0.2:
+                sentence, links = self.back_reference()
+            else:
+                sentence, links = self.sentence(self.r.randint(*refs), pool, case_mode, max_list, hard)
             parts.append(sentence)
             gold |= links
         return " ".join(parts), gold
 
 
-def _readme_case() -> tuple[str, set[Link]]:
-    import re
-
-    readme = (ROOT.parent / "homework_task" / "README.md")
-    if not readme.exists():
-        return "", set()
-    text = re.search(r'test_text = """(.*?)"""', readme.read_text(encoding="utf-8"), re.S).group(1)
-    gold = {
-        (15, "374", "1", "1"), (13, "105", None, None), (0, None, "10", None), (13, "105", "5", None),
-        (13, "158", "3", None), (5, "30", None, None), (13, "159", "4", "12"), (13, "228", "2", None),
-        (15, "275", None, None), (8, "90", None, None), (10, "70", None, None), (6, "213", "1", None),
-        (0, "20", "а", None), (984, "16", None, None), (330, "14", "2", None), (224, "19", None, None),
-        (412, "9", "р", None), (284, "16", "1", None), (362, "22", "б", "2"), (332, "12", None, None),
-        (249, "20", "3", None), (5, "34", "1", None), (17, "30.1", "3", None), (0, "211", None, None),
+def build_levels(seed: int = 2025):
+    g = Generator(seed)
+    full = {**CODES_SHORT, **LAWS_FULL}
+    hard = {**CODES_SHORT, **LAWS_HARD}
+    n = TEXTS_PER_LEVEL
+    example = ((ROOT / "tests" / "example_text.txt").read_text(encoding="utf-8"), EXAMPLE_GOLD)
+    return {
+        "1_simple": [g.text(1, (1, 1), CODES_SHORT, "short", 1, 0.0) for _ in range(n)],
+        "2_full_forms": [g.text(g.r.randint(1, 2), (1, 1), full, "mixed", 3, 0.2) for _ in range(n)],
+        "3_chains": [g.text(g.r.randint(2, 6), (1, 3), full, "mixed", 3, 0.4) for _ in range(n - 1)] + [example],
+        "4_hard": [g.text(g.r.randint(1, 4), (1, 3), hard, "mixed", 3, 0.3, hard=True) for _ in range(n)],
     }
-    gold |= {(174, "14", "1", value) for value in ("4", "5", "6", "8")}
-    gold |= {(15, "66", point, sub) for point in ("3.345", "23") for sub in ("а", "б", "с")}
-    return text, gold
 
 
-def build_levels(seed: int = 2025) -> dict[str, list[tuple[str, set[Link]]]]:
-    b = Builder(seed)
-    full_pool = {**LAWS_SHORT, **LAWS_FULL}
-    levels: dict[str, list[tuple[str, set[Link]]]] = {}
-    levels["1_simple"] = [b.text(1, (1, 1), LAWS_SHORT, "abbr", 1, 0.0) for _ in range(CASES_PER_LEVEL)]
-    levels["2_full_forms"] = [b.text(b.r.randint(1, 2), (1, 1), full_pool, "mixed", 3, 0.2) for _ in range(CASES_PER_LEVEL)]
-    levels["3_chains"] = [b.text(b.r.randint(2, 6), (1, 3), full_pool, "mixed", 3, 0.4) for _ in range(CASES_PER_LEVEL - 1)]
-    levels["3_chains"].append(_readme_case())
-    levels["4_hard"] = [b.text(b.r.randint(1, 4), (1, 3), {**LAWS_SHORT, **LAWS_HARD}, "mixed", 3, 0.3, hard=True)
-                        for _ in range(CASES_PER_LEVEL)]
-    return levels
-
-
-def _http_detector(url: str):
-    def detect(text: str) -> set[Link]:
-        request = urllib.request.Request(
-            url,
-            data=json.dumps({"text": text}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-        )
+def http_detector(url: str):
+    def detect(text: str) -> set:
+        body = json.dumps({"text": text}).encode("utf-8")
+        request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(request, timeout=30) as response:
-            payload = json.load(response)
-        return {
-            (item["law_id"], item["article"], item["point_article"], item["subpoint_article"])
-            for item in payload["links"]
-        }
+            links = json.load(response)["links"]
+        return {(x["law_id"], x["article"], x["point_article"], x["subpoint_article"]) for x in links}
+
     return detect
 
 
+def f1(tp: int, fp: int, fn: int) -> tuple[float, float, float]:
+    precision = tp / max(1, tp + fp)
+    recall = tp / max(1, tp + fn)
+    return precision, recall, 2 * precision * recall / max(1e-12, precision + recall)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--url", help="evaluate a running service instead of the in-process detector")
-    parser.add_argument("--errors", type=int, default=0, help="print up to N failed texts per level")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--url", help="адрес запущенного сервиса, например http://localhost:8978/detect")
+    parser.add_argument("--errors", type=int, default=0, help="сколько текстов с ошибками показать на уровень")
     parser.add_argument("--seed", type=int, default=2025)
     args = parser.parse_args()
 
     started = time.perf_counter()
     if args.url:
-        detect = _http_detector(args.url)
+        detect = http_detector(args.url)
     else:
         from detector import LawReferenceDetector
 
         detector = LawReferenceDetector(ROOT / "law_aliases.json")
-        detect = lambda text: {item.key for item in detector.detect(text)}  # noqa: E731
+
+        def detect(text):
+            return {link.key for link in detector.detect(text)}
+
     print(f"startup_seconds={time.perf_counter() - started:.2f}")
 
+    total = [0, 0, 0]
+    total_time = 0.0
     levels = build_levels(args.seed)
-    total_tp = total_fp = total_fn = 0
-    total_elapsed = 0.0
     for name, cases in levels.items():
-        tp = fp = fn = 0
-        shown = 0
-        level_started = time.perf_counter()
+        tp = fp = fn = shown = 0
+        started = time.perf_counter()
         for text, gold in cases:
-            actual = detect(text)
-            tp += len(actual & gold)
-            fp += len(actual - gold)
-            fn += len(gold - actual)
-            if shown < args.errors and actual != gold:
+            found = detect(text)
+            tp += len(found & gold)
+            fp += len(found - gold)
+            fn += len(gold - found)
+            if found != gold and shown < args.errors:
                 shown += 1
-                print(f"\n[{name}] {text}\n  missing: {sorted(gold - actual, key=str)}\n  extra:   {sorted(actual - gold, key=str)}")
-        elapsed = time.perf_counter() - level_started
-        total_elapsed += elapsed
-        total_tp, total_fp, total_fn = total_tp + tp, total_fp + fp, total_fn + fn
-        precision = tp / max(1, tp + fp)
-        recall = tp / max(1, tp + fn)
-        f1 = 2 * precision * recall / max(1e-12, precision + recall)
-        print(f"{name:14s} texts={len(cases)} P={precision:.3f} R={recall:.3f} F1={f1:.3f} time={elapsed:.2f}s")
-    precision = total_tp / max(1, total_tp + total_fp)
-    recall = total_tp / max(1, total_tp + total_fn)
-    f1 = 2 * precision * recall / max(1e-12, precision + recall)
-    print(f"{'TOTAL':14s} texts={sum(map(len, levels.values()))} P={precision:.3f} R={recall:.3f} F1={f1:.3f} time={total_elapsed:.2f}s")
+                print(f"\n[{name}] {text}\n  пропущено: {sorted(gold - found, key=str)}\n  лишнее:    {sorted(found - gold, key=str)}")
+        elapsed = time.perf_counter() - started
+        total_time += elapsed
+        total = [total[0] + tp, total[1] + fp, total[2] + fn]
+        p, r, f = f1(tp, fp, fn)
+        print(f"{name:14s} texts={len(cases)} P={p:.3f} R={r:.3f} F1={f:.3f} time={elapsed:.2f}s")
+    p, r, f = f1(*total)
+    count = sum(len(cases) for cases in levels.values())
+    print(f"{'TOTAL':14s} texts={count} P={p:.3f} R={r:.3f} F1={f:.3f} time={total_time:.2f}s")
 
 
 if __name__ == "__main__":

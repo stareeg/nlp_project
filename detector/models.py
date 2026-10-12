@@ -23,7 +23,7 @@ class LawMention:
 
 @dataclass(frozen=True)
 class Requisite:
-    kind: str
+    kind: str  # article, part, point или subpoint
     values: tuple[str, ...]
     start: int
     end: int
@@ -32,10 +32,10 @@ class Requisite:
 @dataclass
 class ReferenceGroup:
     articles: list[str] = field(default_factory=list)
+    parts: list[str] = field(default_factory=list)
     points: list[str] = field(default_factory=list)
     subpoints: list[str] = field(default_factory=list)
     start: int = 0
-    end: int = 0
 
 
 @dataclass(frozen=True)

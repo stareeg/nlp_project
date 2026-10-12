@@ -2,40 +2,35 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import List, Optional
 
 import uvicorn
 from fastapi import Depends, FastAPI, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from detector import LawReferenceDetector
 
 
-BASE_DIR = Path(__file__).resolve().parent
-
-
 class LawLink(BaseModel):
     law_id: int
-    article: str | None = None
-    point_article: str | None = None
-    subpoint_article: str | None = None
+    article: Optional[str] = None
+    point_article: Optional[str] = None
+    subpoint_article: Optional[str] = None
 
 
 class LinksResponse(BaseModel):
-    links: list[LawLink]
+    links: List[LawLink]
 
 
 class TextRequest(BaseModel):
-    text: str = Field(max_length=1_000_000)
+    text: str
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # The alias automaton and ambiguity metadata are built once. Requests only
-    # scan text and never read files or compile expressions.
-    app.state.detector = LawReferenceDetector(BASE_DIR / "law_aliases.json")
+    # индекс строится один раз при старте, это занимает несколько секунд
+    app.state.detector = LawReferenceDetector(Path(__file__).parent / "law_aliases.json")
     yield
-    del app.state.detector
 
 
 def get_detector(request: Request) -> LawReferenceDetector:
@@ -44,33 +39,28 @@ def get_detector(request: Request) -> LawReferenceDetector:
 
 app = FastAPI(
     title="Law Links Service",
-    description="Сервис для выделения ссылок на нормы российского права",
-    version="2.0.0",
+    description="Сервис для выделения юридических ссылок из текста",
+    version="1.0.0",
     lifespan=lifespan,
 )
 
 
-@app.post("/detect", response_model=LinksResponse)
-async def get_law_links(
-    data: TextRequest,
-    detector: Annotated[LawReferenceDetector, Depends(get_detector)],
-) -> LinksResponse:
-    parsed = detector.detect(data.text)
-    return LinksResponse(
-        links=[
-            LawLink(
-                law_id=item.law_id,
-                article=item.article,
-                point_article=item.point_article,
-                subpoint_article=item.subpoint_article,
-            )
-            for item in parsed
-        ]
-    )
+@app.post("/detect")
+async def get_law_links(data: TextRequest, detector: LawReferenceDetector = Depends(get_detector)) -> LinksResponse:
+    links = [
+        LawLink(
+            law_id=link.law_id,
+            article=link.article,
+            point_article=link.point_article,
+            subpoint_article=link.subpoint_article,
+        )
+        for link in detector.detect(data.text)
+    ]
+    return LinksResponse(links=links)
 
 
 @app.get("/health")
-async def health_check() -> dict[str, str]:
+async def health_check():
     return {"status": "healthy"}
 
 

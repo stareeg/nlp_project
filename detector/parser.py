@@ -11,72 +11,56 @@ from .normalizer import normalize_text
 from .requisites import extract_requisites
 
 
-_ABBREVIATIONS = {
-    "ст",
-    "п",
-    "пп",
-    "подп",
-    "ч",
-    "абз",
-    "гл",
-    "разд",
-    "прил",
-    "см",
-    "утв",
-    "им",
-    "т",
-    "д",
-    "др",
-    "рф",
-    "фз",
-    "ред",
-    "г",
-    "гг",
-    "руб",
-    "тыс",
-    "млн",
+# сокращения, после которых точка не конец предложения
+ABBREVIATIONS = {
+    "ст", "п", "пп", "подп", "ч", "абз", "гл", "разд", "прил", "см", "утв", "им",
+    "т", "д", "др", "рф", "фз", "ред", "г", "гг", "руб", "тыс", "млн",
 }
-_RIGHT_PREFIX_RE = re.compile(
-    r"^[\s,:()\-]*(?:(?:в|по|из|согласно|включая)\s+)?$",
-    re.IGNORECASE,
-)
-# Requisites this close to the next law name are its left-hand context.
-_LEFT_CONTEXT_GAP = 55
-_SEPARATORS_RE = re.compile(r"[\s,;:()\-]*(?:(?:и|или|а также|также)[\s,;:()\-]*)*")
+RIGHT_PREFIX_RE = re.compile(r"^[\s,:()\-]*(?:(?:в|по|из|согласно|включая)\s+)?$")
+SEPARATORS_RE = re.compile(r"[\s,;:()\-]*(?:(?:и|или|а также|также)[\s,;:()\-]*)*")
+SAME_ARTICLE = r"(?:той же|указанной|этой|данной|названной)\s+стать(?:и|е|ей|ю)"
+SAME_LAW = r"(?:того же|указанного|этого|данного|названного)\s+(?:федерального\s+)?(?:кодекса|закона)"
+SAME_ARTICLE_RE = re.compile(SAME_ARTICLE)
+SAME_LAW_RE = re.compile(SAME_LAW)
+ANAPHORA_RE = re.compile(rf"{SAME_ARTICLE}|{SAME_LAW}")
+ANAPHORA_AHEAD_RE = re.compile(rf"\s*(?:{SAME_ARTICLE}|{SAME_LAW})")
+
+# если реквизит дальше от названия закона, считаем что он не к нему
+MAX_GAP = 55
+LEFT_WINDOW = 450
+RIGHT_WINDOW = 180
 
 
-class _Sentences:
-    """Sentence boundaries of one text, computed once in a single pass."""
-
+class Sentences:
     def __init__(self, text: str) -> None:
         self.length = len(text)
-        self.boundaries = [index for index in range(len(text)) if _is_boundary(text, index)]
+        self.bounds = [i for i in range(len(text)) if is_sentence_end(text, i)]
 
-    def start(self, position: int) -> int:
-        number = bisect_left(self.boundaries, position)
-        return self.boundaries[number - 1] + 1 if number else 0
+    def start(self, pos: int) -> int:
+        i = bisect_left(self.bounds, pos)
+        return self.bounds[i - 1] + 1 if i else 0
 
-    def end(self, position: int) -> int:
-        number = bisect_left(self.boundaries, position)
-        return self.boundaries[number] if number < len(self.boundaries) else self.length
+    def end(self, pos: int) -> int:
+        i = bisect_left(self.bounds, pos)
+        return self.bounds[i] if i < len(self.bounds) else self.length
 
 
-def _is_boundary(text: str, index: int) -> bool:
-    char = text[index]
+def is_sentence_end(text: str, i: int) -> bool:
+    char = text[i]
     if char in "!?;":
         return True
     if char != ".":
         return False
-    previous = text[index - 1] if index else ""
-    following = text[index + 1] if index + 1 < len(text) else ""
-    if previous.isdigit() and following.isdigit():
+    prev = text[i - 1] if i else ""
+    nxt = text[i + 1] if i + 1 < len(text) else ""
+    if prev.isdigit() and nxt.isdigit():
         return False
-    word_start = index
+    word_start = i
     while word_start and ("a" <= text[word_start - 1] <= "z" or "а" <= text[word_start - 1] <= "я"):
         word_start -= 1
-    if text[word_start:index] in _ABBREVIATIONS:
+    if text[word_start:i] in ABBREVIATIONS:
         return False
-    return not following or following.isspace()
+    return not nxt or nxt.isspace()
 
 
 class LawReferenceDetector:
@@ -84,199 +68,219 @@ class LawReferenceDetector:
         self.index = LawAliasIndex.from_json(aliases_path)
 
     def detect(self, text: str) -> list[ParsedLawLink]:
-        normalized = normalize_text(text)
-        if not normalized:
+        text = normalize_text(text)
+        if not text:
             return []
-        sentences = _Sentences(normalized)
-        mentions = self.index.find(normalized)
-        mentions = self._add_fuzzy_mentions(normalized, mentions, sentences)
+        sentences = Sentences(text)
+        mentions = self.index.find(text)
+        mentions = self.add_fuzzy_mentions(text, mentions, sentences)
         links: list[ParsedLawLink] = []
-        for mention_index, mention in enumerate(mentions):
-            previous_end = mentions[mention_index - 1].end if mention_index else 0
-            next_start = mentions[mention_index + 1].start if mention_index + 1 < len(mentions) else None
-            links.extend(self._parse_mention(normalized, mention, previous_end, next_start, sentences))
-        return self._deduplicate(links)
+        for i, mention in enumerate(mentions):
+            prev_end = mentions[i - 1].end if i else 0
+            next_start = mentions[i + 1].start if i + 1 < len(mentions) else None
+            links.extend(self.parse_mention(text, mention, prev_end, next_start, sentences))
+        links.extend(self.anaphora_links(text, links, sentences))
+        return deduplicate(links)
 
-    def _add_fuzzy_mentions(
-        self,
-        text: str,
-        exact_mentions: list[LawMention],
-        sentences: _Sentences,
-    ) -> list[LawMention]:
+    def add_fuzzy_mentions(self, text: str, exact: list[LawMention], sentences: Sentences) -> list[LawMention]:
+        # ищем название с опечаткой только сразу после реквизита, где точного совпадения нет
         requisites = extract_requisites(text)
-        mention_starts = [mention.start for mention in exact_mentions]
+        starts = [m.start for m in exact]
         fuzzy: list[LawMention] = []
-        for number, requisite in enumerate(requisites):
-            sentence_end = sentences.end(requisite.end)
-            next_index = bisect_left(mention_starts, requisite.end)
-            if next_index < len(exact_mentions):
-                next_start = mention_starts[next_index]
-                if next_start <= sentence_end and self._only_requisites_between(
-                    text, requisites[number + 1 :], requisite.end, next_start
-                ):
+        for i, req in enumerate(requisites):
+            sentence_end = sentences.end(req.end)
+            j = bisect_left(starts, req.end)
+            if j < len(exact) and starts[j] <= sentence_end:
+                if only_requisites_between(text, requisites[i + 1 :], req.end, starts[j]):
                     continue
-            fragment_end = min(sentence_end, requisite.end + 350)
-            fragment = text[requisite.end:fragment_end]
-            mention = self.index.find_fuzzy(fragment, requisite.end)
+            fragment = text[req.end : min(sentence_end, req.end + 350)]
+            mention = self.index.find_fuzzy(fragment, req.end)
             if mention is None:
                 continue
-            if any(mention.start < item.end and item.start < mention.end for item in exact_mentions + fuzzy):
+            if any(mention.start < m.end and m.start < mention.end for m in exact + fuzzy):
                 continue
             fuzzy.append(mention)
-        return sorted(exact_mentions + fuzzy, key=lambda item: item.start)
+        return sorted(exact + fuzzy, key=lambda m: m.start)
 
-    @staticmethod
-    def _only_requisites_between(text: str, requisites: list[Requisite], start: int, end: int) -> bool:
-        pieces: list[str] = []
-        position = start
-        for requisite in requisites:
-            if requisite.start >= end:
-                break
-            pieces.append(text[position : requisite.start])
-            position = max(position, requisite.end)
-        pieces.append(text[position:end])
-        return _SEPARATORS_RE.fullmatch(" ".join(pieces)) is not None
-
-    def _parse_mention(
+    def parse_mention(
         self,
         text: str,
         mention: LawMention,
-        previous_law_end: int,
+        prev_law_end: int,
         next_law_start: int | None,
-        sentences: _Sentences,
+        sentences: Sentences,
     ) -> list[ParsedLawLink]:
         sentence_start = sentences.start(mention.start)
         sentence_end = sentences.end(mention.end)
-        left_start = max(previous_law_end, sentence_start, mention.start - 450)
-        right_end = min(len(text) if next_law_start is None else next_law_start, sentence_end, mention.end + 180)
+        left_start = max(prev_law_end, sentence_start, mention.start - LEFT_WINDOW)
+        # "п. 3 указанной статьи и ст. 5 ГК РФ": п. 3 уже относится к прошлой статье
+        for match in ANAPHORA_RE.finditer(text, left_start, mention.start):
+            left_start = match.end()
+        right_end = min(len(text) if next_law_start is None else next_law_start, sentence_end, mention.end + RIGHT_WINDOW)
 
-        left_requisites = extract_requisites(text[left_start : mention.start], left_start)
-        # A legal requisite must directly introduce the law name. This prevents
-        # stale markers earlier in a long sentence from leaking into a match.
-        if left_requisites and mention.start - left_requisites[-1].end > _LEFT_CONTEXT_GAP:
-            left_requisites = []
+        left = extract_requisites(text[left_start : mention.start], left_start)
+        if left and mention.start - left[-1].end > MAX_GAP:
+            left = []
+        groups = groups_before_law(left)
 
-        groups = self._groups_before_law(left_requisites, mention.start)
+        right = extract_requisites(text[mention.end : right_end], mention.end)
+        if right:
+            prefix = text[mention.end : right[0].start]
+            if right[0].start - mention.end > 45 or not RIGHT_PREFIX_RE.fullmatch(prefix):
+                right = []
+        # "ст. 105 УК РФ, ч. 2 ст. 158 УК РФ": ч. 2 относится к следующему закону
+        if right and next_law_start is not None and right_end == next_law_start <= sentence_end:
+            if next_law_start - right[-1].end <= MAX_GAP:
+                right = []
+        if right and ANAPHORA_AHEAD_RE.match(text, right[-1].end):
+            right = []
+        if groups and any(r.kind == "article" for r in right):
+            right = []
 
-        right_fragment = text[mention.end:right_end]
-        right_requisites = extract_requisites(right_fragment, mention.end)
-        if right_requisites:
-            prefix = text[mention.end : right_requisites[0].start]
-            if right_requisites[0].start - mention.end > 45 or not _RIGHT_PREFIX_RE.fullmatch(prefix):
-                right_requisites = []
-        if right_requisites and next_law_start is not None and right_end == next_law_start <= sentence_end:
-            # "ст. 105 УК РФ, ч. 2 ст. 158 УК РФ": the trailing requisites
-            # introduce the next law, as reverse order is the norm.
-            if next_law_start - right_requisites[-1].end <= _LEFT_CONTEXT_GAP:
-                right_requisites = []
-        if groups and any(item.kind == "article" for item in right_requisites):
-            right_requisites = []
-
-        if groups and right_requisites:
-            self._attach_trailing_requisites(groups[-1], right_requisites)
-        elif not groups and right_requisites:
-            groups = self._groups_after_law(right_requisites)
-
+        if groups and right:
+            attach_trailing(groups[-1], right)
+        elif right:
+            groups = groups_after_law(right)
         if not groups:
             return []
 
-        context_start = max(0, mention.start - 260)
-        context_end = min(len(text), mention.end + 260)
-        law_id = self.index.resolve(mention, text[context_start:context_end])
-        links: list[ParsedLawLink] = []
-        for group in groups:
-            if not (group.articles or group.points or group.subpoints):
-                continue
-            articles = group.articles or [None]
-            points = group.points or [None]
-            subpoints = group.subpoints or [None]
-            for article, point, subpoint in product(articles, points, subpoints):
-                links.append(
-                    ParsedLawLink(
-                        law_id=law_id,
-                        article=article,
-                        point_article=point,
-                        subpoint_article=subpoint,
-                        position=group.start,
-                    )
-                )
-        return links
+        context = text[max(0, mention.start - 260) : mention.end + 260]
+        law_id = self.index.resolve(mention, context)
+        return [link for group in groups for link in group_links(group, law_id)]
 
-    @staticmethod
-    def _groups_before_law(requisites: list[Requisite], law_start: int) -> list[ReferenceGroup]:
-        if not requisites:
-            return []
-        article_indexes = [index for index, item in enumerate(requisites) if item.kind == "article"]
-        if not article_indexes:
-            return [LawReferenceDetector._group_from(requisites)]
-
-        groups: list[ReferenceGroup] = []
-        previous_article_index = -1
-        for article_index in article_indexes:
-            article = requisites[article_index]
-            preceding = requisites[previous_article_index + 1 : article_index]
-            group = LawReferenceDetector._group_from(preceding)
-            group.articles.extend(article.values)
-            group.start = preceding[0].start if preceding else article.start
-            group.end = article.end
-            groups.append(group)
-            previous_article_index = article_index
-
-        trailing = requisites[article_indexes[-1] + 1 :]
-        if trailing:
-            LawReferenceDetector._attach_trailing_requisites(groups[-1], trailing)
-            groups[-1].end = trailing[-1].end
-        return groups
-
-    @staticmethod
-    def _groups_after_law(requisites: list[Requisite]) -> list[ReferenceGroup]:
-        article_indexes = [index for index, item in enumerate(requisites) if item.kind == "article"]
-        if not article_indexes:
-            return [LawReferenceDetector._group_from(requisites)]
-
-        groups: list[ReferenceGroup] = []
-        for number, article_index in enumerate(article_indexes):
-            next_index = article_indexes[number + 1] if number + 1 < len(article_indexes) else len(requisites)
-            article = requisites[article_index]
-            following = requisites[article_index + 1 : next_index]
-            group = LawReferenceDetector._group_from(following)
-            group.articles.extend(article.values)
-            group.start = article.start
-            group.end = following[-1].end if following else article.end
-            groups.append(group)
-        return groups
-
-    @staticmethod
-    def _group_from(requisites: list[Requisite]) -> ReferenceGroup:
-        group = ReferenceGroup()
-        if requisites:
-            group.start = requisites[0].start
-            group.end = requisites[-1].end
-        for requisite in requisites:
-            target = group.points if requisite.kind == "point" else group.subpoints if requisite.kind == "subpoint" else group.articles
-            target.extend(value for value in requisite.values if value not in target)
-        return group
-
-    @staticmethod
-    def _attach_trailing_requisites(group: ReferenceGroup, requisites: list[Requisite]) -> None:
-        for requisite in requisites:
-            if requisite.kind == "article":
-                continue
-            target = group.points if requisite.kind == "point" else group.subpoints
-            for value in requisite.values:
-                if value not in target:
-                    target.append(value)
-
-    @staticmethod
-    def _deduplicate(links: list[ParsedLawLink]) -> list[ParsedLawLink]:
+    def anaphora_links(self, text: str, links: list[ParsedLawLink], sentences: Sentences) -> list[ParsedLawLink]:
+        # "п. 3 указанной статьи", "ст. 11 того же кодекса"
         result: list[ParsedLawLink] = []
-        seen: set[tuple[int, str | None, str | None, str | None]] = set()
-        for link in sorted(links, key=lambda item: item.position):
-            if link.key in seen:
-                continue
-            seen.add(link.key)
-            result.append(link)
+        for regex, same_article in ((SAME_ARTICLE_RE, True), (SAME_LAW_RE, False)):
+            for match in regex.finditer(text):
+                before = [link for link in links + result if link.position < match.start()]
+                if not before:
+                    continue
+                anchor = max(before, key=lambda link: link.position)
+                chain = chain_before(text, match.start(), sentences)
+                if not chain:
+                    continue
+                if same_article:
+                    if anchor.article is None or any(r.kind == "article" for r in chain):
+                        continue
+                    group = group_from(chain)
+                    group.articles = [anchor.article]
+                    groups = [group]
+                else:
+                    groups = groups_before_law(chain)
+                for group in groups:
+                    result.extend(group_links(group, anchor.law_id))
         return result
 
 
-__all__ = ["LawReferenceDetector"]
+def only_requisites_between(text: str, requisites: list[Requisite], start: int, end: int) -> bool:
+    pieces: list[str] = []
+    pos = start
+    for req in requisites:
+        if req.start >= end:
+            break
+        pieces.append(text[pos : req.start])
+        pos = max(pos, req.end)
+    pieces.append(text[pos:end])
+    return SEPARATORS_RE.fullmatch(" ".join(pieces)) is not None
+
+
+def chain_before(text: str, end: int, sentences: Sentences) -> list[Requisite]:
+    start = max(sentences.start(end), end - 200)
+    requisites = extract_requisites(text[start:end], start)
+    chain: list[Requisite] = []
+    border = end
+    for req in reversed(requisites):
+        if not SEPARATORS_RE.fullmatch(text[req.end : border]):
+            break
+        chain.insert(0, req)
+        border = req.start
+    return chain
+
+
+def groups_before_law(requisites: list[Requisite]) -> list[ReferenceGroup]:
+    if not requisites:
+        return []
+    article_idx = [i for i, r in enumerate(requisites) if r.kind == "article"]
+    if not article_idx:
+        return [group_from(requisites)]
+
+    groups: list[ReferenceGroup] = []
+    prev = -1
+    for i in article_idx:
+        preceding = requisites[prev + 1 : i]
+        group = group_from(preceding)
+        group.articles.extend(requisites[i].values)
+        group.start = preceding[0].start if preceding else requisites[i].start
+        groups.append(group)
+        prev = i
+    trailing = requisites[article_idx[-1] + 1 :]
+    if trailing:
+        attach_trailing(groups[-1], trailing)
+    return groups
+
+
+def groups_after_law(requisites: list[Requisite]) -> list[ReferenceGroup]:
+    article_idx = [i for i, r in enumerate(requisites) if r.kind == "article"]
+    if not article_idx:
+        return [group_from(requisites)]
+
+    groups: list[ReferenceGroup] = []
+    for n, i in enumerate(article_idx):
+        next_i = article_idx[n + 1] if n + 1 < len(article_idx) else len(requisites)
+        group = group_from(requisites[i + 1 : next_i])
+        group.articles.extend(requisites[i].values)
+        group.start = requisites[i].start
+        groups.append(group)
+    return groups
+
+
+def group_from(requisites: list[Requisite]) -> ReferenceGroup:
+    group = ReferenceGroup()
+    if requisites:
+        group.start = requisites[0].start
+    for req in requisites:
+        add_values(group, req)
+    return group
+
+
+def attach_trailing(group: ReferenceGroup, requisites: list[Requisite]) -> None:
+    for req in requisites:
+        if req.kind != "article":
+            add_values(group, req)
+
+
+def add_values(group: ReferenceGroup, req: Requisite) -> None:
+    target = {
+        "article": group.articles,
+        "part": group.parts,
+        "point": group.points,
+        "subpoint": group.subpoints,
+    }[req.kind]
+    target.extend(value for value in req.values if value not in target)
+
+
+def group_links(group: ReferenceGroup, law_id: int) -> list[ParsedLawLink]:
+    points, subpoints = group.points, group.subpoints
+    if group.parts:
+        if points and not subpoints:
+            # "пункт 2 части 1 статьи 7": часть идёт в point_article, пункт в subpoint_article
+            points, subpoints = group.parts, group.points
+        else:
+            points = group.parts + [p for p in points if p not in group.parts]
+    if not (group.articles or points or subpoints):
+        return []
+    return [
+        ParsedLawLink(law_id, article, point, subpoint, group.start)
+        for article, point, subpoint in product(group.articles or [None], points or [None], subpoints or [None])
+    ]
+
+
+def deduplicate(links: list[ParsedLawLink]) -> list[ParsedLawLink]:
+    result: list[ParsedLawLink] = []
+    seen: set[tuple] = set()
+    for link in sorted(links, key=lambda link: link.position):
+        if link.key not in seen:
+            seen.add(link.key)
+            result.append(link)
+    return result

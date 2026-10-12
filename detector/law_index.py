@@ -12,213 +12,161 @@ from .models import LawMention, Token
 from .normalizer import alias_tokens, normalize_text, tokenize
 
 
-_FUZZY_THRESHOLD = 0.89
-_FUZZY_MARGIN = 0.015
-_FUZZY_FLOOR = _FUZZY_THRESHOLD - _FUZZY_MARGIN
-_REQUISITE_TOKENS = {"ст", "п", "пп", "подп", "ч", "абз", "пункт", "стат", "част", "подпункт"}
+FUZZY_THRESHOLD = 0.89
+FUZZY_MARGIN = 0.015
+# кандидаты с похожестью ниже этой всё равно ни на что не влияют
+FUZZY_FLOOR = FUZZY_THRESHOLD - FUZZY_MARGIN
+REQUISITE_TOKENS = {"ст", "п", "пп", "подп", "ч", "абз", "пункт", "стат", "част", "подпункт"}
+
 
 @dataclass
-class _Node:
+class Node:
     children: dict[str, int] = field(default_factory=dict)
     fail: int = 0
     outputs: list[tuple[tuple[str, ...], tuple[int, ...], str]] = field(default_factory=list)
 
 
-@dataclass(frozen=True)
-class LawMetadata:
-    numbers: frozenset[str]
-    dates: frozenset[str]
-
-
 class LawAliasIndex:
-    """Token-level Aho-Corasick index for all supplied law aliases."""
-
+    # Ахо-Корасик по токенам: все алиасы ищутся за один проход по тексту
     def __init__(self, aliases: dict[str, list[str]]) -> None:
         self.aliases = expand_aliases({int(key): values for key, values in aliases.items()})
-        self.nodes: list[_Node] = [_Node()]
-        self.metadata: dict[int, LawMetadata] = {}
-        grouped: dict[tuple[str, ...], set[int]] = {}
-        display: dict[tuple[str, ...], str] = {}
+        self.nodes = [Node()]
+        self.numbers: dict[int, set[str]] = {}
+        self.dates: dict[int, set[str]] = {}
+        laws_by_key: dict[tuple[str, ...], set[int]] = {}
+        longest_alias: dict[tuple[str, ...], str] = {}
 
         for law_id, variants in self.aliases.items():
-            normalized_variants = [normalize_text(value) for value in variants]
-            numbers: set[str] = set()
-            dates: set[str] = set()
-            for normalized in normalized_variants:
-                numbers.update(re.findall(r"№\d+(?:[-/][\da-zа-я]+)*", normalized))
-                dates.update(re.findall(r"\b\d{2}\.\d{2}\.\d{4}\b", normalized))
-            self.metadata[law_id] = LawMetadata(frozenset(numbers), frozenset(dates))
-
+            self.numbers[law_id] = set()
+            self.dates[law_id] = set()
             for alias in variants:
+                normalized = normalize_text(alias)
+                self.numbers[law_id].update(re.findall(r"№\d+(?:[-/][\da-zа-я]+)*", normalized))
+                self.dates[law_id].update(re.findall(r"\b\d{2}\.\d{2}\.\d{4}\b", normalized))
                 key = alias_tokens(alias)
                 if not key:
                     continue
-                grouped.setdefault(key, set()).add(law_id)
-                if key not in display or len(alias) > len(display[key]):
-                    display[key] = alias
+                laws_by_key.setdefault(key, set()).add(law_id)
+                if len(alias) > len(longest_alias.get(key, "")):
+                    longest_alias[key] = alias
 
-        for key, law_ids in grouped.items():
-            self._insert(key, tuple(sorted(law_ids)), display[key])
-        self._build_failures()
-        self._fuzzy_entries: list[tuple[tuple[str, ...], tuple[int, ...], str]] = []
-        self._fuzzy_postings: dict[str, list[int]] = {}
-        self._fuzzy_by_initial: dict[str, set[int]] = {}
-        for key, law_ids in grouped.items():
+        for key, law_ids in laws_by_key.items():
+            self.insert(key, tuple(sorted(law_ids)), longest_alias[key])
+        self.build_fail_links()
+
+        self.fuzzy_entries: list[tuple[tuple[str, ...], tuple[int, ...], str]] = []
+        self.fuzzy_by_token: dict[str, list[int]] = {}
+        self.fuzzy_by_letter: dict[str, set[int]] = {}
+        for key, law_ids in laws_by_key.items():
             if not 2 <= len(key) <= 24:
                 continue
-            entry_index = len(self._fuzzy_entries)
-            self._fuzzy_entries.append((key, tuple(sorted(law_ids)), display[key]))
+            n = len(self.fuzzy_entries)
+            self.fuzzy_entries.append((key, tuple(sorted(law_ids)), longest_alias[key]))
             for token in set(key):
-                self._fuzzy_postings.setdefault(token, []).append(entry_index)
-            self._fuzzy_by_initial.setdefault(key[0][0], set()).add(entry_index)
+                self.fuzzy_by_token.setdefault(token, []).append(n)
+            self.fuzzy_by_letter.setdefault(key[0][0], set()).add(n)
 
     @classmethod
-    def from_json(cls, path: str | Path) -> "LawAliasIndex":
-        with open(path, encoding="utf-8") as source:
-            return cls(json.load(source))
+    def from_json(cls, path: str | Path) -> LawAliasIndex:
+        with open(path, encoding="utf-8") as file:
+            return cls(json.load(file))
 
-    def _insert(self, tokens: tuple[str, ...], law_ids: tuple[int, ...], alias: str) -> None:
+    def insert(self, tokens: tuple[str, ...], law_ids: tuple[int, ...], alias: str) -> None:
         state = 0
         for token in tokens:
-            next_state = self.nodes[state].children.get(token)
-            if next_state is None:
-                next_state = len(self.nodes)
-                self.nodes[state].children[token] = next_state
-                self.nodes.append(_Node())
-            state = next_state
+            if token not in self.nodes[state].children:
+                self.nodes[state].children[token] = len(self.nodes)
+                self.nodes.append(Node())
+            state = self.nodes[state].children[token]
         self.nodes[state].outputs.append((tokens, law_ids, alias))
 
-    def _build_failures(self) -> None:
-        queue: deque[int] = deque()
-        for child in self.nodes[0].children.values():
-            queue.append(child)
+    def build_fail_links(self) -> None:
+        queue = deque(self.nodes[0].children.values())
         while queue:
             state = queue.popleft()
             for token, child in self.nodes[state].children.items():
                 queue.append(child)
-                failure = self.nodes[state].fail
-                while failure and token not in self.nodes[failure].children:
-                    failure = self.nodes[failure].fail
-                self.nodes[child].fail = self.nodes[failure].children.get(token, 0)
+                fail = self.nodes[state].fail
+                while fail and token not in self.nodes[fail].children:
+                    fail = self.nodes[fail].fail
+                self.nodes[child].fail = self.nodes[fail].children.get(token, 0)
                 self.nodes[child].outputs.extend(self.nodes[self.nodes[child].fail].outputs)
 
-    def find(self, normalized_text: str) -> list[LawMention]:
-        tokens = tokenize(normalized_text)
-        candidates = self._find_candidates(tokens)
-        return self._select_non_overlapping(candidates)
+    def find(self, text: str) -> list[LawMention]:
+        tokens = tokenize(text)
+        return select_non_overlapping(self.find_all(tokens))
+
+    def find_all(self, tokens: list[Token]) -> list[LawMention]:
+        found: list[LawMention] = []
+        state = 0
+        for i, token in enumerate(tokens):
+            while state and token.value not in self.nodes[state].children:
+                state = self.nodes[state].fail
+            state = self.nodes[state].children.get(token.value, 0)
+            for key, law_ids, alias in self.nodes[state].outputs:
+                first = i - len(key) + 1
+                if first >= 0:
+                    found.append(LawMention(tokens[first].start, token.end, first, i + 1, law_ids, alias, len(key)))
+        return found
 
     def find_fuzzy(self, fragment: str, offset: int = 0) -> LawMention | None:
-        """Find one near-exact alias at the beginning of an anchored fragment.
-
-        This is intentionally conservative and is only called after a legal
-        requisite when exact matching failed. At least one alias token must
-        still be present, so arbitrary prose never triggers a full scan.
-        """
+        # название с опечаткой в начале фрагмента, порог высокий, чтобы не придумать закон
         query = tokenize(fragment)
         if len(query) < 2:
             return None
         first = query[0].value
-        if not first[0].isalpha() or first in _REQUISITE_TOKENS:
+        if not first[0].isalpha() or first in REQUISITE_TOKENS:
             return None
         query = query[:24]
-        candidate_indexes: set[int] = set()
+        candidates: set[int] = set()
         for token in query:
-            postings = self._fuzzy_postings.get(token.value, ())
-            if len(postings) <= 2500:
-                candidate_indexes.update(postings)
-        # The alias is compared with the beginning of the fragment, and typos
-        # in the very first letter are rare.
-        candidate_indexes.intersection_update(self._fuzzy_by_initial.get(first[0], ()))
-        if not candidate_indexes:
+            entries = self.fuzzy_by_token.get(token.value, ())
+            if len(entries) <= 2500:
+                candidates.update(entries)
+        # опечатка в первой букве бывает редко, а так кандидатов сильно меньше
+        candidates &= self.fuzzy_by_letter.get(first[0], set())
+        if not candidates:
             return None
 
-        scored: list[tuple[float, int, tuple[int, ...], str, int]] = []
+        scored = []
         matcher = SequenceMatcher(None, autojunk=False)
-        for entry_index in candidate_indexes:
-            alias_value, law_ids, alias = self._fuzzy_entries[entry_index]
-            size = len(alias_value)
+        for n in candidates:
+            key, law_ids, alias = self.fuzzy_entries[n]
+            size = len(key)
             if size > len(query):
                 continue
-            query_value = " ".join(token.value for token in query[:size])
-            matcher.set_seqs(query_value, " ".join(alias_value))
-            # Candidates below the threshold minus the margin cannot change
-            # the decision, so the cheap upper bounds skip the full ratio.
-            if matcher.real_quick_ratio() < _FUZZY_FLOOR or matcher.quick_ratio() < _FUZZY_FLOOR:
+            matcher.set_seqs(" ".join(t.value for t in query[:size]), " ".join(key))
+            if matcher.real_quick_ratio() < FUZZY_FLOOR or matcher.quick_ratio() < FUZZY_FLOOR:
                 continue
-            scored.append((matcher.ratio(), size, law_ids, alias, entry_index))
+            scored.append((matcher.ratio(), size, law_ids, alias))
         if not scored:
             return None
         scored.sort(reverse=True, key=lambda item: (item[0], item[1], -len(item[2])))
-        best = scored[0]
-        second_score = next((item[0] for item in scored[1:] if item[2] != best[2]), 0.0)
-        if best[0] < _FUZZY_THRESHOLD or best[0] - second_score < _FUZZY_MARGIN:
+        score, size, law_ids, alias = scored[0]
+        second = next((item[0] for item in scored[1:] if item[2] != law_ids), 0.0)
+        if score < FUZZY_THRESHOLD or score - second < FUZZY_MARGIN:
             return None
-        size = best[1]
-        return LawMention(
-            start=offset + query[0].start,
-            end=offset + query[size - 1].end,
-            token_start=0,
-            token_end=size,
-            law_ids=best[2],
-            alias=best[3],
-            token_count=size,
-        )
-
-    def _find_candidates(self, tokens: list[Token]) -> list[LawMention]:
-        candidates: list[LawMention] = []
-        state = 0
-        for index, token in enumerate(tokens):
-            while state and token.value not in self.nodes[state].children:
-                state = self.nodes[state].fail
-            state = self.nodes[state].children.get(token.value, 0)
-            for alias_tokens_value, law_ids, alias in self.nodes[state].outputs:
-                start_index = index - len(alias_tokens_value) + 1
-                if start_index < 0:
-                    continue
-                candidates.append(
-                    LawMention(
-                        start=tokens[start_index].start,
-                        end=token.end,
-                        token_start=start_index,
-                        token_end=index + 1,
-                        law_ids=law_ids,
-                        alias=alias,
-                        token_count=len(alias_tokens_value),
-                    )
-                )
-        return candidates
-
-    @staticmethod
-    def _select_non_overlapping(candidates: list[LawMention]) -> list[LawMention]:
-        # Long, specific aliases win over abbreviations embedded in them.
-        ranked = sorted(
-            candidates,
-            key=lambda item: (
-                -item.token_count,
-                -(item.end - item.start),
-                len(item.law_ids),
-                item.start,
-            ),
-        )
-        selected: list[LawMention] = []
-        for candidate in ranked:
-            if any(candidate.start < other.end and other.start < candidate.end for other in selected):
-                continue
-            selected.append(candidate)
-        return sorted(selected, key=lambda item: item.start)
+        return LawMention(offset + query[0].start, offset + query[size - 1].end, 0, size, law_ids, alias, size)
 
     def resolve(self, mention: LawMention, context: str) -> int:
+        # один алиас у нескольких законов: смотрим, есть ли рядом их номер или дата
         if len(mention.law_ids) == 1:
             return mention.law_ids[0]
+        context = normalize_text(context)
 
-        normalized_context = normalize_text(context)
-        scored: list[tuple[int, int, int]] = []
-        for law_id in mention.law_ids:
-            metadata = self.metadata[law_id]
-            number_score = sum(number in normalized_context for number in metadata.numbers)
-            date_score = sum(date in normalized_context for date in metadata.dates)
-            scored.append((number_score * 10 + date_score * 20, -law_id, law_id))
-        return max(scored)[2]
+        def score(law_id: int) -> tuple[int, int]:
+            numbers = sum(number in context for number in self.numbers[law_id])
+            dates = sum(date in context for date in self.dates[law_id])
+            return numbers * 10 + dates * 20, -law_id
+
+        return max(mention.law_ids, key=score)
 
 
-__all__ = ["LawAliasIndex"]
+def select_non_overlapping(found: list[LawMention]) -> list[LawMention]:
+    # длинное название важнее короткого сокращения внутри него
+    ranked = sorted(found, key=lambda m: (-m.token_count, -(m.end - m.start), len(m.law_ids), m.start))
+    selected: list[LawMention] = []
+    for mention in ranked:
+        if not any(mention.start < other.end and other.start < mention.end for other in selected):
+            selected.append(mention)
+    return sorted(selected, key=lambda m: m.start)

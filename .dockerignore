@@ -5,6 +5,4 @@ __pycache__
 .git
 .gitignore
 tests
-tools
-generated_cases.jsonl
 .DS_Store
