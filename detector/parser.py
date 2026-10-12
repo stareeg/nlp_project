@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left
 from itertools import product
 from pathlib import Path
 import re
@@ -24,6 +25,42 @@ _RIGHT_PREFIX_RE = re.compile(
     r"^[\s,:()\-]*(?:(?:в|по|из|согласно|включая)\s+)?$",
     re.IGNORECASE,
 )
+# Requisites this close to the next law name are its left-hand context.
+_LEFT_CONTEXT_GAP = 55
+
+
+class _Sentences:
+    """Sentence boundaries of one text, computed once in a single pass."""
+
+    def __init__(self, text: str) -> None:
+        self.length = len(text)
+        self.boundaries = [index for index in range(len(text)) if _is_boundary(text, index)]
+
+    def start(self, position: int) -> int:
+        number = bisect_left(self.boundaries, position)
+        return self.boundaries[number - 1] + 1 if number else 0
+
+    def end(self, position: int) -> int:
+        number = bisect_left(self.boundaries, position)
+        return self.boundaries[number] if number < len(self.boundaries) else self.length
+
+
+def _is_boundary(text: str, index: int) -> bool:
+    char = text[index]
+    if char in "!?;":
+        return True
+    if char != ".":
+        return False
+    previous = text[index - 1] if index else ""
+    following = text[index + 1] if index + 1 < len(text) else ""
+    if previous.isdigit() and following.isdigit():
+        return False
+    word_start = index
+    while word_start and ("a" <= text[word_start - 1] <= "z" or "а" <= text[word_start - 1] <= "я"):
+        word_start -= 1
+    if text[word_start:index] in _ABBREVIATIONS:
+        return False
+    return not following or following.isspace()
 
 
 class LawReferenceDetector:
@@ -34,26 +71,32 @@ class LawReferenceDetector:
         normalized = normalize_text(text)
         if not normalized:
             return []
+        sentences = _Sentences(normalized)
         mentions = self.index.find(normalized)
-        mentions = self._add_fuzzy_mentions(normalized, mentions)
+        mentions = self._add_fuzzy_mentions(normalized, mentions, sentences)
         links: list[ParsedLawLink] = []
         for mention_index, mention in enumerate(mentions):
             previous_end = mentions[mention_index - 1].end if mention_index else 0
             next_start = mentions[mention_index + 1].start if mention_index + 1 < len(mentions) else len(normalized)
-            links.extend(self._parse_mention(normalized, mention, previous_end, next_start))
+            links.extend(self._parse_mention(normalized, mention, previous_end, next_start, sentences))
         return self._deduplicate(links)
 
-    def _add_fuzzy_mentions(self, text: str, exact_mentions: list[LawMention]) -> list[LawMention]:
+    def _add_fuzzy_mentions(
+        self,
+        text: str,
+        exact_mentions: list[LawMention],
+        sentences: _Sentences,
+    ) -> list[LawMention]:
         requisites = extract_requisites(text)
         fuzzy: list[LawMention] = []
         for requisite in requisites:
+            sentence_end = sentences.end(requisite.end)
             if any(
-                requisite.end <= mention.start <= requisite.end + 450
-                and mention.start < self._sentence_end(text, requisite.end)
+                requisite.end <= mention.start <= requisite.end + 450 and mention.start < sentence_end
                 for mention in exact_mentions
             ):
                 continue
-            fragment_end = min(self._sentence_end(text, requisite.end), requisite.end + 350)
+            fragment_end = min(sentence_end, requisite.end + 350)
             fragment = text[requisite.end:fragment_end]
             mention = self.index.find_fuzzy(fragment, requisite.end)
             if mention is None:
@@ -69,16 +112,17 @@ class LawReferenceDetector:
         mention: LawMention,
         previous_law_end: int,
         next_law_start: int,
+        sentences: _Sentences,
     ) -> list[ParsedLawLink]:
-        sentence_start = self._sentence_start(text, mention.start)
-        sentence_end = self._sentence_end(text, mention.end)
+        sentence_start = sentences.start(mention.start)
+        sentence_end = sentences.end(mention.end)
         left_start = max(previous_law_end, sentence_start, mention.start - 450)
         right_end = min(next_law_start, sentence_end, mention.end + 180)
 
         left_requisites = extract_requisites(text[left_start : mention.start], left_start)
         # A legal requisite must directly introduce the law name. This prevents
         # stale markers earlier in a long sentence from leaking into a match.
-        if left_requisites and mention.start - left_requisites[-1].end > 55:
+        if left_requisites and mention.start - left_requisites[-1].end > _LEFT_CONTEXT_GAP:
             left_requisites = []
 
         groups = self._groups_before_law(left_requisites, mention.start)
@@ -89,6 +133,13 @@ class LawReferenceDetector:
             prefix = text[mention.end : right_requisites[0].start]
             if right_requisites[0].start - mention.end > 45 or not _RIGHT_PREFIX_RE.fullmatch(prefix):
                 right_requisites = []
+        if right_requisites and right_end == next_law_start and next_law_start <= sentence_end:
+            # "ст. 105 УК РФ, ч. 2 ст. 158 УК РФ": the trailing requisites
+            # introduce the next law, as reverse order is the norm.
+            if next_law_start - right_requisites[-1].end <= _LEFT_CONTEXT_GAP:
+                right_requisites = []
+        if groups and any(item.kind == "article" for item in right_requisites):
+            right_requisites = []
 
         if groups and right_requisites:
             self._attach_trailing_requisites(groups[-1], right_requisites)
@@ -184,37 +235,6 @@ class LawReferenceDetector:
             for value in requisite.values:
                 if value not in target:
                     target.append(value)
-
-    @staticmethod
-    def _sentence_start(text: str, position: int) -> int:
-        last = 0
-        for index in range(position):
-            if LawReferenceDetector._is_boundary(text, index):
-                last = index + 1
-        return last
-
-    @staticmethod
-    def _sentence_end(text: str, position: int) -> int:
-        for index in range(position, len(text)):
-            if LawReferenceDetector._is_boundary(text, index):
-                return index
-        return len(text)
-
-    @staticmethod
-    def _is_boundary(text: str, index: int) -> bool:
-        char = text[index]
-        if char in "!?;":
-            return True
-        if char != ".":
-            return False
-        previous = text[index - 1] if index else ""
-        following = text[index + 1] if index + 1 < len(text) else ""
-        if previous.isdigit() and following.isdigit():
-            return False
-        word_match = re.search(r"([a-zа-я]+)$", text[:index])
-        if word_match and word_match.group(1) in _ABBREVIATIONS:
-            return False
-        return not following or following.isspace()
 
     @staticmethod
     def _deduplicate(links: list[ParsedLawLink]) -> list[ParsedLawLink]:

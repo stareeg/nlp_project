@@ -96,6 +96,30 @@ class DetectorTest(unittest.TestCase):
     def test_fuzzy_fallback_does_not_accept_invented_code(self):
         self.assertEqual(tuples(self.detector, "ст. 34 Случайного кодекса"), [])
 
+    def test_chain_requisites_belong_to_next_law(self):
+        actual = tuples(self.detector, "ст. 105 УК РФ, ч. 2 ст. 158 УК РФ")
+        self.assertEqual(actual, [(13, "105", None, None), (13, "158", "2", None)])
+        actual = tuples(self.detector, "п. 1 ст. 9 КоАП РФ, п. 4 ст. 304 НК РФ")
+        self.assertEqual(actual, [(17, "9", "1", None), (15, "304", "4", None)])
+
+    def test_chain_after_full_name(self):
+        actual = tuples(
+            self.detector,
+            "Согласно статье 23 Налогового кодекса и ст. 145 Гражданского кодекса, пп. 1, 2 п. 2 ст. 3 НК РФ",
+        )
+        self.assertEqual(
+            actual,
+            [(15, "23", None, None), (5, "145", None, None), (15, "3", "2", "1"), (15, "3", "2", "2")],
+        )
+
+    def test_conjunction_a_is_not_a_value(self):
+        actual = tuples(self.detector, "ст. 143 и 332, а также ст. 227 НК РФ")
+        self.assertEqual(actual, [(15, "143", None, None), (15, "332", None, None), (15, "227", None, None)])
+
+    def test_empty_text(self):
+        self.assertEqual(tuples(self.detector, ""), [])
+        self.assertEqual(tuples(self.detector, "   "), [])
+
 
 if __name__ == "__main__":
     unittest.main()

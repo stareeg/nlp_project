@@ -24,7 +24,7 @@ _MARKER_RE = re.compile(
     re.IGNORECASE,
 )
 
-_ATOM = r"(?:\d+(?:\.\d+)*(?:-\d+(?:\.\d+)*)?[а-я]?(?![а-я\d])|[а-я](?![а-я.]))"
+_ATOM = r"(?:\d+(?:\.\d+)*(?:-\d+(?:\.\d+)*)?[а-я]?(?![а-я\d])|[а-я](?![а-я.])(?!\s+также))"
 _VALUE_EXPRESSION_RE = re.compile(
     rf"^\s*[:№]?\s*(?P<values>{_ATOM}(?:\s*(?:,|;|\bи\b|\bили\b)\s*{_ATOM})*)",
     re.IGNORECASE,
@@ -41,14 +41,14 @@ def extract_requisites(text: str, offset: int = 0) -> list[Requisite]:
         value_match = _VALUE_EXPRESSION_RE.match(tail)
         if not value_match:
             continue
+        kind = "subpoint" if marker.group("subpoint") else "article" if marker.group("article") else "point"
         values = tuple(
             value.casefold().replace("ё", "е")
             for value in _SPLIT_RE.split(value_match.group("values"))
-            if _ATOM_RE.fullmatch(value)
+            if _ATOM_RE.fullmatch(value) and not (kind == "article" and value.isalpha())
         )
         if not values:
             continue
-        kind = "subpoint" if marker.group("subpoint") else "article" if marker.group("article") else "point"
         result.append(
             Requisite(
                 kind=kind,

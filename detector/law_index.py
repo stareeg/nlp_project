@@ -11,6 +11,10 @@ from .models import LawMention, Token
 from .normalizer import alias_tokens, normalize_text, tokenize
 
 
+_FUZZY_THRESHOLD = 0.89
+_FUZZY_MARGIN = 0.015
+_FUZZY_FLOOR = _FUZZY_THRESHOLD - _FUZZY_MARGIN
+
 @dataclass
 class _Node:
     children: dict[str, int] = field(default_factory=dict)
@@ -119,21 +123,25 @@ class LawAliasIndex:
             return None
 
         scored: list[tuple[float, int, tuple[int, ...], str, int]] = []
+        matcher = SequenceMatcher(None, autojunk=False)
         for entry_index in candidate_indexes:
             alias_value, law_ids, alias = self._fuzzy_entries[entry_index]
             size = len(alias_value)
             if size > len(query):
                 continue
             query_value = " ".join(token.value for token in query[:size])
-            alias_text = " ".join(alias_value)
-            score = SequenceMatcher(None, query_value, alias_text, autojunk=False).ratio()
-            scored.append((score, size, law_ids, alias, entry_index))
+            matcher.set_seqs(query_value, " ".join(alias_value))
+            # Candidates below the threshold minus the margin cannot change
+            # the decision, so the cheap upper bounds skip the full ratio.
+            if matcher.real_quick_ratio() < _FUZZY_FLOOR or matcher.quick_ratio() < _FUZZY_FLOOR:
+                continue
+            scored.append((matcher.ratio(), size, law_ids, alias, entry_index))
         if not scored:
             return None
         scored.sort(reverse=True, key=lambda item: (item[0], item[1], -len(item[2])))
         best = scored[0]
         second_score = next((item[0] for item in scored[1:] if item[2] != best[2]), 0.0)
-        if best[0] < 0.89 or best[0] - second_score < 0.015:
+        if best[0] < _FUZZY_THRESHOLD or best[0] - second_score < _FUZZY_MARGIN:
             return None
         size = best[1]
         return LawMention(
