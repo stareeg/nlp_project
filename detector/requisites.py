@@ -17,9 +17,34 @@ MARKER_RE = re.compile(
     rf"(?<![а-яa-z])(?:(?P<subpoint>{SUBPOINT})|(?P<article>{ARTICLE})|(?P<part>{PART})|(?P<point>{POINT}))"
 )
 
-PLAIN_VALUE = r"(?:\d+(?:\.\d+)*(?:-\d+(?:\.\d+)*)?[а-я]?(?![а-я\d])|[а-я](?![а-я.])(?!\s+также))"
+NUMBER = r"\d+(?:\.\d+)*"
+# диапазон: "10-12", "10 - 12", "10 – 12" (тире уже заменено на дефис), "с 10 по 12"
+RANGE_SEP = r"(?:\s*-\s*|\s+по\s+)"
+RANGE_SEP_RE = re.compile(RANGE_SEP)
+# порядковые числительные: "части первой статьи 5", "ч. вторая ст. 7"
+ORDINAL_STEMS = {
+    "перв": "1", "втор": "2", "трет": "3", "четверт": "4", "пят": "5", "шест": "6", "седьм": "7",
+    "восьм": "8", "девят": "9", "десят": "10", "одиннадцат": "11", "двенадцат": "12",
+    "тринадцат": "13", "четырнадцат": "14", "пятнадцат": "15", "шестнадцат": "16",
+    "семнадцат": "17", "восемнадцат": "18", "девятнадцат": "19", "двадцат": "20",
+}
+ORDINAL_ENDINGS = (
+    "ого", "ому", "ыми", "ый", "ой", "ая", "ое", "ые", "ом", "ую", "ым", "ых",
+    "ий", "ья", "ье", "ьего", "ьему", "ьем", "ью", "ьей", "ьим", "ьих", "ьи",
+)
+ORDINAL_STEM = "|".join(sorted(ORDINAL_STEMS, key=len, reverse=True))
+ORDINAL_ENDING = "|".join(sorted(ORDINAL_ENDINGS, key=len, reverse=True))
+ORDINAL = rf"(?:{ORDINAL_STEM})(?:{ORDINAL_ENDING})(?![а-я])"
+ORDINAL_RE = re.compile(rf"(?P<stem>{ORDINAL_STEM})(?:{ORDINAL_ENDING})")
+PLAIN_VALUE = (
+    rf"(?:{NUMBER}(?:{RANGE_SEP}{NUMBER})?[а-я]?(?![а-я\d])"
+    rf"|{ORDINAL}"
+    r"|[а-я](?![а-я.])(?!\s+также))"
+)
 VALUE = rf'(?:"{PLAIN_VALUE}"|{PLAIN_VALUE})'
-VALUES_RE = re.compile(rf"^\s*[:№]?\s*(?P<values>{VALUE}(?:\s*(?:,|;|\bи\b|\bили\b)\s*{VALUE})*)")
+VALUES_RE = re.compile(
+    rf"^\s*[:№]?\s*(?:с\s+(?={NUMBER}\s+по\s+\d))?(?P<values>{VALUE}(?:\s*(?:,|;|\bи\b|\bили\b)\s*{VALUE})*)"
+)
 VALUE_RE = re.compile(rf"^{VALUE}$")
 SPLIT_RE = re.compile(r"\s*(?:,|;|\bи\b|\bили\b)\s*")
 
@@ -77,21 +102,63 @@ def find_markers(text: str) -> list[tuple[str, int, int]]:
     return sorted(markers, key=lambda marker: marker[1])
 
 
+def number_key(value: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in value.split("."))
+
+
+def normalize_value(value: str) -> tuple[str, bool] | None:
+    """Приводит значение к строке; второй элемент - было ли оно записано словом ("первой")."""
+    m = ORDINAL_RE.fullmatch(value)
+    if m:
+        return ORDINAL_STEMS[m["stem"]], True
+    if not RANGE_SEP_RE.search(value) or re.fullmatch(r"\d+(?:\.\d+)*-\d+(?:\.\d+)*[а-я]?", value):
+        return value, False
+    # "10 - 12", "10 по 12": склеиваем в "10-12", если это похоже на диапазон (правая граница больше),
+    # иначе ("ст. 158 - 3 года") оставляем только левое число
+    left, right = RANGE_SEP_RE.split(value, maxsplit=1)
+    suffix = right[-1] if right[-1].isalpha() else ""
+    right = right.rstrip("абвгдежзийклмнопрстуфхцчшщъыьэюя")
+    if number_key(right) > number_key(left):
+        return f"{left}-{right}{suffix}", False
+    return left, False
+
+
+# что может стоять сразу после реквизита, записанного словом: "части первой статьи 5"
+HIGHER = {"subpoint": {"point", "part", "article"}, "point": {"part", "article"}, "part": {"article"}}
+
+
 def extract_requisites(text: str, offset: int = 0) -> list[Requisite]:
-    result: list[Requisite] = []
+    found: list[tuple[Requisite, bool]] = []
     for kind, start, end in find_markers(text):
         match = VALUES_RE.match(text[end : end + 100])
         if not match:
             continue
         values = []
+        ordinal = False
         for value in SPLIT_RE.split(match.group("values")):
             if not VALUE_RE.fullmatch(value):
                 continue
-            value = value.strip('"')
-            # буква не может быть номером статьи
-            if kind == "article" and value.isalpha():
+            normalized = normalize_value(value.strip('"'))
+            if normalized is None:
                 continue
-            values.append(value)
+            value, is_ordinal = normalized
+            # буква не может быть номером статьи; статьи словами ("статья первая") не пишут
+            if kind == "article" and (value.isalpha() or is_ordinal):
+                continue
+            ordinal = ordinal or is_ordinal
+            if value not in values:
+                values.append(value)
         if values:
-            result.append(Requisite(kind, tuple(values), offset + start, offset + end + match.end()))
+            found.append((Requisite(kind, tuple(values), offset + start, offset + end + match.end()), ordinal))
+
+    result: list[Requisite] = []
+    for i, (req, ordinal) in enumerate(found):
+        if ordinal:
+            # "часть первая" без статьи следом - это часть кодекса ("ст. 217 части второй НК РФ"),
+            # а не часть статьи, поэтому берём такой реквизит только перед статьёй/частью
+            nxt = found[i + 1][0] if i + 1 < len(found) else None
+            between = text[req.end - offset : nxt.start - offset] if nxt else ""
+            if nxt is None or nxt.kind not in HIGHER.get(req.kind, ()) or not re.fullmatch(r"[\s,]*", between):
+                continue
+        result.append(req)
     return result
