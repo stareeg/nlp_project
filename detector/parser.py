@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from bisect import bisect_left
+import hashlib
 from itertools import product
 from pathlib import Path
+import pickle
 import re
 
 from .law_index import LawAliasIndex
@@ -18,12 +20,16 @@ ABBREVIATIONS = {
 }
 RIGHT_PREFIX_RE = re.compile(r"^[\s,:()\-]*(?:(?:в|по|из|согласно|включая)\s+)?$")
 SEPARATORS_RE = re.compile(r"[\s,;:()\-]*(?:(?:и|или|а также|также)[\s,;:()\-]*)*")
-SAME_ARTICLE = r"(?:той же|указанной|этой|данной|названной)\s+стать(?:и|е|ей|ю)"
-SAME_LAW = r"(?:того же|указанного|этого|данного|названного)\s+(?:федерального\s+)?(?:кодекса|закона)"
+SAME_ARTICLE = r"(?:(?:той|этой)\s+же|указанной|этой|данной|названной)\s+стать(?:и|е|ей|ю)"
+SAME_LAW = (
+    r"(?:(?:(?:того|этого)\s+же|указанного|этого|данного|названного)\s+(?:федерального\s+)?(?:кодекса|закона)"
+    r"|там\s+же)"
+)
 SAME_ARTICLE_RE = re.compile(SAME_ARTICLE)
 SAME_LAW_RE = re.compile(SAME_LAW)
 ANAPHORA_RE = re.compile(rf"{SAME_ARTICLE}|{SAME_LAW}")
 ANAPHORA_AHEAD_RE = re.compile(rf"\s*(?:{SAME_ARTICLE}|{SAME_LAW})")
+DIGIT_AHEAD_RE = re.compile(r"\s*\d")
 
 # если реквизит дальше от названия закона, считаем что он не к нему
 MAX_GAP = 55
@@ -47,7 +53,10 @@ class Sentences:
 
 def is_sentence_end(text: str, i: int) -> bool:
     char = text[i]
-    if char in "!?;":
+    if char == ";":
+        # "ст. 10; 11 УК РФ": здесь точка с запятой разделяет номера, а не предложения
+        return not (i and text[i - 1].isdigit() and DIGIT_AHEAD_RE.match(text, i + 1))
+    if char in "!?":
         return True
     if char != ".":
         return False
@@ -66,6 +75,34 @@ def is_sentence_end(text: str, i: int) -> bool:
 class LawReferenceDetector:
     def __init__(self, aliases_path: str | Path) -> None:
         self.index = LawAliasIndex.from_json(aliases_path)
+
+    @classmethod
+    def cached(cls, aliases_path: str | Path) -> LawReferenceDetector:
+        # индекс строится несколько секунд, поэтому сохраняем его рядом со словарём
+        # и пересобираем, только если поменялся словарь или код детектора
+        aliases_path = Path(aliases_path)
+        cache_path = aliases_path.with_suffix(".index.pkl")
+        digest = hashlib.sha256(aliases_path.read_bytes())
+        for source in sorted(Path(__file__).parent.glob("*.py")):
+            digest.update(source.read_bytes())
+        key = digest.hexdigest()
+
+        if cache_path.exists():
+            with open(cache_path, "rb") as file:
+                if pickle.load(file) == key:
+                    return pickle.load(file)
+
+        detector = cls(aliases_path)
+        tmp_path = cache_path.with_name(cache_path.name + ".tmp")
+        try:
+            with open(tmp_path, "wb") as file:
+                pickle.dump(key, file)
+                pickle.dump(detector, file, protocol=pickle.HIGHEST_PROTOCOL)
+            tmp_path.replace(cache_path)
+        except OSError:
+            # нет прав на запись - работаем без кеша
+            pass
+        return detector
 
     def detect(self, text: str) -> list[ParsedLawLink]:
         text = normalize_text(text)

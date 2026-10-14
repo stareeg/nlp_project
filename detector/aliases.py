@@ -13,6 +13,19 @@ LETTER_NUMBER_RE = re.compile(r"^\d+-[A-Za-zА-Яа-я]+$")
 FEDERAL_NUMBER_RE = re.compile(r"^(?P<base>\d+)-(?P<suffix>ФЗ|ФКЗ)$", re.IGNORECASE)
 ABBREVIATION_RE = re.compile(r"^(?P<abbr>[A-Za-zА-Яа-я]{2,6}) РФ$")
 
+# общепринятые сокращения, которых нет в словаре; ключ - название закона из словаря
+EXTRA_ALIASES = {
+    "Градостроительный кодекс": ["ГрК РФ", "ГрК России", "ГрК", "ГрКРФ"],
+    "Кодекс административного судопроизводства": ["КАС РФ", "КАС России", "КАС", "КАСРФ"],
+    "Водный кодекс": ["ВК РФ", "ВК России", "ВК", "ВКРФ"],
+    "Воздушный кодекс": ["ВзК РФ", "ВзК России", "ВзК", "ВзКРФ"],
+    # "ТК ЕАЭС" - Таможенный, а не Трудовой; более длинный алиас перебивает "ТК"
+    "Таможенный кодекс": [
+        "ТК ЕАЭС", "ТК ТС", "Таможенный кодекс ЕАЭС", "Таможенный кодекс Таможенного союза",
+        "Таможенный кодекс Евразийского экономического союза",
+    ],
+}
+
 
 def expand_aliases(aliases: dict[int, list[str]]) -> dict[int, list[str]]:
     owners: dict[tuple[str, ...], set[int]] = {}
@@ -20,9 +33,19 @@ def expand_aliases(aliases: dict[int, list[str]]) -> dict[int, list[str]]:
         for alias in variants:
             owners.setdefault(alias_tokens(alias), set()).add(law_id)
 
+    by_name = {alias: law_id for law_id, variants in aliases.items() for alias in variants}
+    manual: dict[int, list[str]] = {}
+    for name, extra_aliases in EXTRA_ALIASES.items():
+        law_id = by_name.get(name)
+        if law_id is None:
+            continue
+        for alias in extra_aliases:
+            if owners.get(alias_tokens(alias), {law_id}) == {law_id}:
+                manual.setdefault(law_id, []).append(alias)
+
     result: dict[int, list[str]] = {}
     for law_id, variants in aliases.items():
-        extra: list[str] = []
+        extra: list[str] = list(manual.get(law_id, []))
         for alias in variants:
             # "Федеральный закон №152-ФЗ от 27.07.2006" -> "Федеральный закон от 27.07.2006 №152-ФЗ"
             m = NUMBER_DATE_RE.match(alias)

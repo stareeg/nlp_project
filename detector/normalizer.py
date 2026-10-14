@@ -9,12 +9,22 @@ from .models import Token
 
 DASHES = str.maketrans({char: "-" for char in "\u2010\u2011\u2012\u2013\u2014\u2015\u2212"})
 QUOTES = str.maketrans({"«": '"', "»": '"', "„": '"', "“": '"', "”": '"', "‟": '"', "‘": "'", "’": "'"})
+PUNCTUATION = {**DASHES, **QUOTES}
 # латинские буквы, похожие на русские ("CК РФ" в словаре набрано с латинской C)
 HOMOGLYPHS = str.maketrans("aceopxykmtbh", "асеорхукмтвн")
-MIXED_WORD_RE = re.compile(r"[a-zа-я]*(?:[a-z][а-я]|[а-я][a-z])[a-zа-я]*")
+LETTERS_RE = re.compile(r"[a-zа-я]+")
+LATIN_RE = re.compile(r"[a-z]")
+CYRILLIC_RE = re.compile(r"[а-я]")
 SPACE_RE = re.compile(r"[\s\u00a0\u2007\u202f]+")
 NUMBER_SIGN_RE = re.compile(r"(?<![\wа-я])(?:no|n)\.?\s*(?=\d)")
 NUMBER_SPACE_RE = re.compile(r"№\s+(?=\d)")
+# "УК-РФ", "У.К. РФ", "Н К РФ"
+CODE_ABBREVIATIONS = {
+    "апк", "бк", "вк", "взк", "гк", "гпк", "грк", "жк", "зк", "кас", "коап", "лк", "нк", "ск",
+    "тк", "ук", "уик", "упк",
+}
+CODE_HYPHEN_RE = re.compile(r"(?<![а-я])(" + "|".join(sorted(CODE_ABBREVIATIONS)) + r")-(рф|россии)(?![а-я])")
+SPLIT_CODE_RE = re.compile(r"(?<![а-я])(?:[а-я](?:\.\s?|\s)){1,3}[а-я]\.?(?=\s?(?:рф|россии)(?![а-я]))")
 # знаки препинания не токены, поэтому запятые и кавычки в названии не мешают
 TOKEN_RE = re.compile(r"№\d+(?:[./-]\d+)*(?:-[a-zа-я]+)?|\d+(?:[./-]\d+)*(?:-[a-zа-я]+)?|[a-zа-я]+(?:-[a-zа-я0-9]+)*")
 RUSSIAN_WORD_RE = re.compile(r"^[а-я]+$")
@@ -96,13 +106,30 @@ def stem_token(value: str) -> str:
     return russian_stem(value)
 
 
+def fix_mixed_word(match: re.Match) -> str:
+    word = match.group(0)
+    if LATIN_RE.search(word) and CYRILLIC_RE.search(word):
+        return word.translate(HOMOGLYPHS)
+    return word
+
+
+def join_split_code(match: re.Match) -> str:
+    joined = re.sub(r"[.\s]", "", match.group(0))
+    # "т.к. РФ" почти всегда значит "так как РФ", а не Трудовой кодекс
+    if joined in CODE_ABBREVIATIONS and joined != "тк":
+        return joined + " "
+    return match.group(0)
+
+
 def normalize_text(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
-    text = text.translate(DASHES).translate(QUOTES)
+    text = text.translate(PUNCTUATION)
     text = text.casefold().replace("ё", "е")
-    text = MIXED_WORD_RE.sub(lambda m: m.group(0).translate(HOMOGLYPHS), text)
+    text = LETTERS_RE.sub(fix_mixed_word, text)
     text = NUMBER_SIGN_RE.sub("№", text)
     text = NUMBER_SPACE_RE.sub("№", text)
+    text = CODE_HYPHEN_RE.sub(r"\1 \2", text)
+    text = SPLIT_CODE_RE.sub(join_split_code, text)
     return SPACE_RE.sub(" ", text).strip()
 
 

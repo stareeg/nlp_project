@@ -27,6 +27,7 @@ class DetectorTest(unittest.TestCase):
         )
         self.check("п. 1 ст. 2 случайного кодекса", [])
         self.check("ст. 34 Случайного кодекса", [])
+        self.check("ст. 1 Конституции РФ", [])
 
     def test_lists(self):
         self.check("пп. 1, 2, 3 п. 2 ст. 3 НК РФ", [(15, "3", "2", "1"), (15, "3", "2", "2"), (15, "3", "2", "3")])
@@ -58,12 +59,25 @@ class DetectorTest(unittest.TestCase):
         self.check("согласно ст. 10 НК РФ, п. 3 указанной статьи", [(15, "10", None, None), (15, "10", "3", None)])
         self.check("в ст. 10 ГК РФ и ст. 11 того же кодекса", [(5, "10", None, None), (5, "11", None, None)])
         self.check("п. 3 указанной статьи и ст. 5 ГК РФ", [(5, "5", None, None)])
+        self.check("в ст. 10 ГК РФ и ст. 11 этого же кодекса", [(5, "10", None, None), (5, "11", None, None)])
+        self.check("в ст. 10 ГК РФ, ст. 11 там же", [(5, "10", None, None), (5, "11", None, None)])
 
     def test_values(self):
         self.check("ст. 43.2-6 НК РФ", [(15, "43.2-6", None, None)])
         self.check("пп. «а» и «е» п. 1 ст. 10 НК РФ", [(15, "10", "1", "а"), (15, "10", "1", "е")])
         self.check("подп. 13 ч. 9 ст. 310 УК РФ", [(13, "310", "9", "13")])
         self.check("пп.л п. 2 ст. 252 ЖК РФ", [(7, "252", "2", "л")])
+
+    def test_ranges(self):
+        for text in ("ст. 10-12 УК РФ", "ст. 10 – 12 УК РФ", "статьи с 10 по 12 УК РФ"):
+            self.check(text, [(13, "10-12", None, None)])
+        self.check("ст. 10; 11 УК РФ", [(13, "10", None, None), (13, "11", None, None)])
+        self.check("по ст. 158 - 3 года УК РФ", [(13, "158", None, None)])
+
+    def test_ordinal_parts(self):
+        self.check("согласно части первой статьи 5 УК РФ", [(13, "5", "1", None)])
+        self.check("ч. первая ст. 5 УК РФ", [(13, "5", "1", None)])
+        self.check("ст. 217 части второй НК РФ", [(15, "217", None, None)])
 
     def test_inflected_names(self):
         self.check("В пункте 1 статьи 34 Гражданского кодекса Российской Федерации", [(5, "34", "1", None)])
@@ -81,6 +95,17 @@ class DetectorTest(unittest.TestCase):
         self.check("ст. 10 УКРФ", [(13, "10", None, None)])
         for text in ("ст. 6 Федерального закона от 27.07.2006 N 152-ФЗ", "ст. 6 закона № 152-ФЗ", "ст. 6 ФЗ-152"):
             self.check(text, [(330, "6", None, None)])
+
+    def test_code_abbreviations(self):
+        for text in ("ст. 105 УК-РФ", "ст. 105 У.К. РФ", "ст. 105 У К РФ"):
+            self.check(text, [(13, "105", None, None)])
+        self.check("ст. 1 ГрК РФ", [(4, "1", None, None)])
+        self.check("ст. 1 КАС РФ", [(18, "1", None, None)])
+        self.check("ст. 1 ВК РФ", [(2, "1", None, None)])
+        self.check("ст. 1 ВзК РФ", [(3, "1", None, None)])
+        self.check("ст. 1 ТК ЕАЭС", [(9, "1", None, None)])
+        self.check("ст. 81 ТК РФ", [(10, "81", None, None)])
+        self.check("Применяется ст. 5, т.к. РФ является стороной договора.", [])
 
     def test_no_links(self):
         self.check("", [])

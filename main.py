@@ -28,8 +28,7 @@ class TextRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # индекс строится один раз при старте, это занимает несколько секунд
-    app.state.detector = LawReferenceDetector(Path(__file__).parent / "law_aliases.json")
+    app.state.detector = LawReferenceDetector.cached(Path(__file__).parent / "law_aliases.json")
     yield
 
 
