@@ -12,15 +12,13 @@ QUOTES = str.maketrans({"«": '"', "»": '"', "„": '"', "“": '"', "”": '"'
 PUNCTUATION = {**DASHES, **QUOTES}
 # латинские буквы, похожие на русские ("CК РФ" в словаре набрано с латинской C)
 HOMOGLYPHS = str.maketrans("aceopxykmtbh", "асеорхукмтвн")
-# слово целиком, а смешение алфавитов проверяем внутри: старый вариант
-# "[a-zа-я]*(?:[a-z][а-я]|[а-я][a-z])[a-zа-я]*" был квадратичным на длинных словах
 LETTERS_RE = re.compile(r"[a-zа-я]+")
 LATIN_RE = re.compile(r"[a-z]")
 CYRILLIC_RE = re.compile(r"[а-я]")
 SPACE_RE = re.compile(r"[\s\u00a0\u2007\u202f]+")
 NUMBER_SIGN_RE = re.compile(r"(?<![\wа-я])(?:no|n)\.?\s*(?=\d)")
 NUMBER_SPACE_RE = re.compile(r"№\s+(?=\d)")
-# сокращения кодексов, которые пишут через дефис, точки или пробелы: "УК-РФ", "У.К. РФ", "Н К РФ"
+# "УК-РФ", "У.К. РФ", "Н К РФ"
 CODE_ABBREVIATIONS = {
     "апк", "бк", "вк", "взк", "гк", "гпк", "грк", "жк", "зк", "кас", "коап", "лк", "нк", "ск",
     "тк", "ук", "уик", "упк",
@@ -117,7 +115,10 @@ def fix_mixed_word(match: re.Match) -> str:
 
 def join_split_code(match: re.Match) -> str:
     joined = re.sub(r"[.\s]", "", match.group(0))
-    return joined + " " if joined in CODE_ABBREVIATIONS else match.group(0)
+    # "т.к. РФ" почти всегда значит "так как РФ", а не Трудовой кодекс
+    if joined in CODE_ABBREVIATIONS and joined != "тк":
+        return joined + " "
+    return match.group(0)
 
 
 def normalize_text(text: str) -> str:

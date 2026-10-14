@@ -20,9 +20,11 @@ ABBREVIATIONS = {
 }
 RIGHT_PREFIX_RE = re.compile(r"^[\s,:()\-]*(?:(?:в|по|из|согласно|включая)\s+)?$")
 SEPARATORS_RE = re.compile(r"[\s,;:()\-]*(?:(?:и|или|а также|также)[\s,;:()\-]*)*")
-# "той же статьи", "этой же статьи", "указанной статьи"
 SAME_ARTICLE = r"(?:(?:той|этой)\s+же|указанной|этой|данной|названной)\s+стать(?:и|е|ей|ю)"
-SAME_LAW = r"(?:(?:того|этого)\s+же|указанного|этого|данного|названного)\s+(?:федерального\s+)?(?:кодекса|закона)"
+SAME_LAW = (
+    r"(?:(?:(?:того|этого)\s+же|указанного|этого|данного|названного)\s+(?:федерального\s+)?(?:кодекса|закона)"
+    r"|там\s+же)"
+)
 SAME_ARTICLE_RE = re.compile(SAME_ARTICLE)
 SAME_LAW_RE = re.compile(SAME_LAW)
 ANAPHORA_RE = re.compile(rf"{SAME_ARTICLE}|{SAME_LAW}")
@@ -52,7 +54,7 @@ class Sentences:
 def is_sentence_end(text: str, i: int) -> bool:
     char = text[i]
     if char == ";":
-        # "ст. 10; 11 УК РФ": точка с запятой внутри перечня номеров не режет предложение
+        # "ст. 10; 11 УК РФ": здесь точка с запятой разделяет номера, а не предложения
         return not (i and text[i - 1].isdigit() and DIGIT_AHEAD_RE.match(text, i + 1))
     if char in "!?":
         return True
@@ -75,27 +77,30 @@ class LawReferenceDetector:
         self.index = LawAliasIndex.from_json(aliases_path)
 
     @classmethod
-    def cached(cls, aliases_path: str | Path, cache_path: str | Path | None = None) -> LawReferenceDetector:
-        # индекс строится ~6 секунд, поэтому собираем его один раз (в Dockerfile при сборке образа)
-        # и потом только загружаем; ключ кеша - хеш словаря и кода детектора
+    def cached(cls, aliases_path: str | Path) -> LawReferenceDetector:
+        # индекс строится несколько секунд, поэтому сохраняем его рядом со словарём
+        # и пересобираем, только если поменялся словарь или код детектора
         aliases_path = Path(aliases_path)
-        cache_path = Path(cache_path) if cache_path else aliases_path.with_suffix(".index.pkl")
+        cache_path = aliases_path.with_suffix(".index.pkl")
         digest = hashlib.sha256(aliases_path.read_bytes())
         for source in sorted(Path(__file__).parent.glob("*.py")):
             digest.update(source.read_bytes())
         key = digest.hexdigest()
-        try:
+
+        if cache_path.exists():
             with open(cache_path, "rb") as file:
-                stored_key, detector = pickle.load(file)
-            if stored_key == key:
-                return detector
-        except Exception:
-            pass
+                if pickle.load(file) == key:
+                    return pickle.load(file)
+
         detector = cls(aliases_path)
+        tmp_path = cache_path.with_name(cache_path.name + ".tmp")
         try:
-            with open(cache_path, "wb") as file:
-                pickle.dump((key, detector), file, protocol=pickle.HIGHEST_PROTOCOL)
+            with open(tmp_path, "wb") as file:
+                pickle.dump(key, file)
+                pickle.dump(detector, file, protocol=pickle.HIGHEST_PROTOCOL)
+            tmp_path.replace(cache_path)
         except OSError:
+            # нет прав на запись - работаем без кеша
             pass
         return detector
 

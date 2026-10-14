@@ -10,7 +10,7 @@ COPY main.py .
 COPY law_aliases.json .
 COPY detector ./detector
 
-# строим индекс алиасов при сборке образа, чтобы сервис стартовал за ~0.5 с, а не за ~7 с
+# индекс собираем при сборке образа, чтобы сервис стартовал за доли секунды
 RUN python -c "from detector import LawReferenceDetector; LawReferenceDetector.cached('law_aliases.json')"
 
 EXPOSE 8978
